@@ -8,6 +8,7 @@ from routers import bowling as bowling_router
 from routers import batting as batting_router
 from routers import action as action_router
 from routers import similarity as similarity_router
+from routers import stance_similarity as stance_similarity_router
 
 
 app = FastAPI(title="CricAI Coach API", version="0.1.0")
@@ -24,7 +25,7 @@ app.include_router(bowling_router.router)
 app.include_router(batting_router.router)
 app.include_router(action_router.router)
 app.include_router(similarity_router.router)
-
+app.include_router(stance_similarity_router.router)
 @app.get("/")
 async def root():
     return {

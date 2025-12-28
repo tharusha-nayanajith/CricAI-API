@@ -1,0 +1,18 @@
+{
+  "timestamp": "20251223_202501",
+  "num_features": 33,
+  "classes": [
+    "cut",
+    "drive",
+    "flick",
+    "misc",
+    "pull",
+    "slog",
+    "sweep"
+  ],
+  "models": [
+    "random_forest",
+    "xgboost",
+    "gradient_boosting"
+  ]
+}

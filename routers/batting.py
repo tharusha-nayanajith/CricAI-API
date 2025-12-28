@@ -5,10 +5,11 @@ Handles HTTP endpoints for shot analysis
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse
 import os
 import tempfile
 from typing import Optional
-
+from features.SHOT_CLASSIFICATION_SYSTEM.utils.config import SUPPORTED_VIDEO_EXTENSIONS, supported_extensions_str
 from services.batting_service import get_batting_service
 
 router = APIRouter(prefix="/batting", tags=["Batting Analysis"])
@@ -60,12 +61,19 @@ async def analyze_shot(
                 detail="Invalid file type. Please upload a video file."
             )
         
+        ext = os.path.splitext(video.filename)[1].lower()
+        if ext not in SUPPORTED_VIDEO_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid file extension '{ext}'. Supported formats: {supported_extensions_str()}"
+            )
+
         # Save uploaded video temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as temp_file:
             content = await video.read()
             temp_file.write(content)
-            temp_video_path = temp_file.name
-        
+            temp_video_path = temp_file.name        
+           
         # Get service and analyze
         service = get_batting_service()
         result = service.analyze_shot(temp_video_path, intended_shot)
@@ -117,8 +125,24 @@ async def batch_analyze_shots(
         
         # Process each video
         for video, intended_shot in zip(videos, intended_shot_list):
+
+             # Validate file type
+            if not video.content_type.startswith('video/'):
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Invalid file type. Please upload a video file."
+                )
+            
+            ext = os.path.splitext(video.filename)[1].lower()
+            if ext not in SUPPORTED_VIDEO_EXTENSIONS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid file extension '{ext}'. Supported formats: {supported_extensions_str()}"
+                )
+
+
             # Save temp file
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as temp_file:
                 content = await video.read()
                 temp_file.write(content)
                 temp_path = temp_file.name

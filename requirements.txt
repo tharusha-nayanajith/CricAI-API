@@ -23,3 +23,10 @@ mmengine
 # mim install mmpose==1.2.0 --no-deps
 
 seaborn==0.13.2
+xgboost==2.0.3
+ultralytics==8.0.230   # YOLOv8
+matplotlib==3.8.2      # For 3D plotting
+Pillow==10.1.0         # For GIF generation
+
+# For AI feedback generation
+google-genai

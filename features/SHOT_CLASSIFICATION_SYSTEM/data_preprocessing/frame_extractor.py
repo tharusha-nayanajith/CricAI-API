@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 from typing import List, Tuple
 import os
-
+from features.SHOT_CLASSIFICATION_SYSTEM.utils.config import SUPPORTED_VIDEO_EXTENSIONS
 
 class FrameExtractor:
     """Extract frames from video files"""
@@ -99,9 +99,9 @@ def batch_extract_frames(video_dir: str, output_dir: str, fps: int = 10):
     extractor = FrameExtractor(fps=fps)
     
     # Get all video files
-    video_extensions = ['.mp4', '.avi', '.mov', '.mkv']
+   
     video_files = [f for f in os.listdir(video_dir) 
-                   if os.path.splitext(f)[1].lower() in video_extensions]
+                   if os.path.splitext(f)[1].lower() in SUPPORTED_VIDEO_EXTENSIONS]
     
     print(f"Found {len(video_files)} videos in {video_dir}")
     
