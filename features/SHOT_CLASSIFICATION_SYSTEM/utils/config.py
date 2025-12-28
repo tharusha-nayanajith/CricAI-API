@@ -47,6 +47,7 @@ RANDOM_FOREST_PARAMS = {
 
 # File paths
 DATASET_PATH = "C:\\Users\\User\\Downloads\\Cricket-Shots" 
+BALL_DATASET_PATH = "datasets/ball_detection"
 MODEL_PATH = "features/SHOT_CLASSIFICATION_SYSTEM/trained_models/rf_model.pkl"
 SCALER_PATH = "features/SHOT_CLASSIFICATION_SYSTEM/trained_models/scaler.pkl"
 

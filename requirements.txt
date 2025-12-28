@@ -32,3 +32,4 @@ Pillow==10.1.0         # For GIF generation
 google-genai
 python-dotenv
 roboflow
+python-dotenv

@@ -4,7 +4,7 @@ Tier 1: Real bat + ball (YOLO)
 Tier 2: Virtual bat + ball (YOLO ball + pose bat)
 Tier 3: Fallback (hand velocity)
 """
-
+from anyio import Path
 import cv2
 import numpy as np
 from typing import List, Dict, Tuple, Optional
@@ -12,7 +12,7 @@ from ultralytics import YOLO
 import os
 from roboflow import Roboflow
 from features.SHOT_CLASSIFICATION_SYSTEM.data_preprocessing.kalman_ball_tracker import KalmanBallTracker
-
+from features.SHOT_CLASSIFICATION_SYSTEM.utils.config import MODEL_FOLDER_PATH
 class BallBatDetector:
     """
     3-Tier cricket contact detection:
@@ -21,7 +21,7 @@ class BallBatDetector:
     3. Fallback (velocity + direction change)
     """
     
-    def __init__(self, model_path: str = None, use_roboflow_ball: bool = True):
+    def __init__(self, model_path: str = None, use_custom_ball_detector: bool = True):
         """Initialize YOLO detector"""
         if model_path and os.path.exists(model_path):
             self.model = YOLO(model_path)
@@ -32,48 +32,54 @@ class BallBatDetector:
             print("✓ Loaded YOLOv8 pretrained model")
 
         self.ball_tracker = KalmanBallTracker()
-        # Roboflow ball detector
-        self.rf_ball_model = None
-        if use_roboflow_ball:
-            print("🔑 Loading Roboflow API key...")
-            api_key = os.getenv("ROBOFLOW_API_KEY")
-            if not api_key:
-                raise RuntimeError("❌ ROBOFLOW_API_KEY not found in environment")
-
-            print("📦 Initializing Roboflow client...")
-            rf = Roboflow(api_key=api_key)
-            try:
-                print("📁 Loading project: cricket-ball-detection-cu0z5")
-                project = rf.workspace().project("cricket-ball-detection-cu0z5")
-
-                print("🔢 Loading model version: 1")
-                self.rf_ball_model = project.version(1).model
-
-            except Exception as e:
-                raise RuntimeError(f"❌ Failed to load Roboflow model: {e}")
-
-            print("✅ Roboflow ball detector loaded successfully")
-            print(f"   • Project: {project.name}")
-            print(f"   • Version: {project.version(1).version}")
-            print(f"   • Type: {project.type}")
+        # Ball detector - use trained YOLOv8 model
+        self.yolo_ball_model = None
+        if use_custom_ball_detector:
+            ball_model_path = Path(MODEL_FOLDER_PATH) / "yolov8_ball_detector" / "best_model.pt"
+            
+            if ball_model_path.exists():
+                print("🏏 Loading trained YOLOv8 ball detector...")
+                self.yolo_ball_model = YOLO(str(ball_model_path))
+                print(f"✅ YOLOv8 ball detector loaded successfully")
+                print(f"   • Model: {ball_model_path.name}")
+                print(f"   • Path: {ball_model_path}")
+            else:
+                # Fallback to training folder if best_model.pt doesn't exist
+                alt_path = Path(MODEL_FOLDER_PATH) / "yolov8_ball_detector" / "train" / "weights" / "best.pt"
+                if alt_path.exists():
+                    print("🏏 Loading trained YOLOv8 ball detector (from train folder)...")
+                    self.yolo_ball_model = YOLO(str(alt_path))
+                    print(f"✅ YOLOv8 ball detector loaded successfully")
+                    print(f"   • Path: {alt_path}")
+                else:
+                    raise FileNotFoundError(
+                        f"❌ Trained ball detector not found!\n"
+                        f"   Checked: {ball_model_path}\n"
+                        f"   And: {alt_path}\n"
+                        f"   Please train the model first using train_yolov8_ball_detector.py"
+                    )
+        else:
+            print("⚠️ Custom ball detector disabled, using main model for ball detection")
 
     def detect_objects(self, frame: np.ndarray) -> Dict:
         """
-        Detect ball and bat using YOLO + Roboflow
-        Improved: Multiple class IDs for ball detection
+        Detect ball and bat using YOLO models
+        - Ball: Custom trained YOLOv8 model (primary)
+        - Ball: Fallback to main YOLO model (if custom unavailable)
+        - Bat: Main YOLO model
         """
         
         
         ball_bbox = None
         ball_conf = 0.0
 
-        # 1️⃣ Roboflow ball (PRIMARY)
-        if self.rf_ball_model is not None:
-            rf_result = self.detect_ball_roboflow(frame)
-            if rf_result is not None:
-                ball_bbox, ball_conf = rf_result
-
-        # 2️⃣ YOLO bat detection
+         # 1️⃣ Custom YOLOv8 ball detector (PRIMARY)
+        if self.yolo_ball_model is not None:
+            yolo_result = self.detect_ball_yolov8(frame)
+            if yolo_result is not None:
+                ball_bbox, ball_conf = yolo_result
+        
+        # 2️⃣ Main YOLO model for bat detection (and fallback ball detection)
         results = self.model(frame, verbose=False)[0]
         bat_bbox = None
         bat_conf = 0.0
@@ -83,11 +89,18 @@ class BallBatDetector:
             conf = float(box.conf[0])
             bbox = box.xyxy[0].cpu().numpy()  
             
-            if cls in [35, 37, 39]:  # bat-like
+             # Bat detection (class IDs: 35=baseball bat, 37=tennis racket, 39=sports ball)
+            if cls in [35, 37, 39]:
                 if conf > bat_conf:
                     bat_bbox = bbox
                     bat_conf = conf
             
+            # 3️⃣ FALLBACK: Use main YOLO for ball if custom detector not available
+            # Class 32 = sports ball in COCO dataset
+            elif cls == 32 and self.yolo_ball_model is None:
+                if conf > ball_conf:
+                    ball_bbox = bbox.astype(int)
+                    ball_conf = conf
             
         
         return {
@@ -209,15 +222,15 @@ class BallBatDetector:
         print(f"   Ball: {ball_rate:.1f}% ({ball_detected_count}/{len(frames)} frames)")
         print(f"   Real Bat: {bat_rate:.1f}% ({real_bat_detected_count}/{len(frames)} frames)")
         
-        # TIER 1: Real bat + ball (both detected by YOLO + Roboflow)
+        # TIER 1: Real bat + ball (both detected by YOLO)
         max_tier1 = max(contact_scores_tier1)
         if max_tier1 > 0.5 and ball_rate > 40:  # Require decent ball detection
             contact_idx = np.argmax(contact_scores_tier1)
             method = 'tier1_real_bat_ball'
             print(f"✅ Tier 1: Real bat + ball detection (score: {max_tier1:.2f})")
         
-        # TIER 2: Virtual bat + ball (ball from Roboflow, bat from pose)
-        elif max(contact_scores_tier2) > 0.3 and ball_rate > 20:
+        # TIER 2: Virtual bat + ball (ball from Yolo, bat from pose)
+        elif max(contact_scores_tier2) > 0.15 and ball_rate > 20:
             contact_idx = np.argmax(contact_scores_tier2)
             method = 'tier2_virtual_bat_ball'
             print(f"✅ Tier 2: Virtual bat + ball detection (score: {max(contact_scores_tier2):.2f})")
@@ -227,7 +240,7 @@ class BallBatDetector:
             
             contact_idx = self._fallback_detection(pose_sequence)
             method = 'tier3_acceleration_direction_change'
-            print(f"⚠️  Tier 3: Fallback to velocity (ball detection too low: {ball_rate:.1f}%)")
+            print(f"⚠️  Tier 3: Fallback to acceleration + direction change (ball detection too low: {ball_rate:.1f}%)")
         
         contact_metadata = {
             'contact_frame': contact_idx,
@@ -398,31 +411,46 @@ class BallBatDetector:
 
         return np.argmax(scores) + 2
 
-    def detect_ball_roboflow(
+    def detect_ball_yolov8(
         self, frame: np.ndarray
     ) -> Optional[Tuple[np.ndarray, float]]:
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        result = self.rf_ball_model.predict(
-            rgb,
-            confidence=20,
-            overlap=30
-        ).json()
-
-        preds = result.get("predictions", [])
-        if not preds:
+         """Detect ball using trained YOLOv8 model"""
+        if self.yolo_ball_model is None:
             return None
 
-        best = max(preds, key=lambda x: x["confidence"])
-
-        x, y, w, h = best["x"], best["y"], best["width"], best["height"]
+        # Run YOLOv8 inference
+        results = self.yolo_ball_model.predict(
+            frame,
+            conf=0.20,  # 20% confidence threshold
+            iou=0.45,   # NMS IoU threshold
+            verbose=False,
+            classes=[0]  # Only detect class 0 (ball)
+        )
+        
+        # Check if any detections
+        if len(results) == 0 or len(results[0].boxes) == 0:
+            return None
+        
+        boxes = results[0].boxes
+        
+        # Get highest confidence detection
+        confidences = boxes.conf.cpu().numpy()
+        best_idx = confidences.argmax()
+        
+        # Extract bbox in xyxy format
+        xyxy = boxes.xyxy[best_idx].cpu().numpy()
+        conf = float(confidences[best_idx])
+        
+        # Convert to [x1, y1, x2, y2] integer format
 
         bbox = np.array([
-            int(x - w / 2),
-            int(y - h / 2),
-            int(x + w / 2),
-            int(y + h / 2)
+            int(xyxy[0]),  # x1
+            int(xyxy[1]),  # y1
+            int(xyxy[2]),  # x2
+            int(xyxy[3])   # y2
         ])
 
-        return bbox, float(best["confidence"])
+        print(self.yolo_ball_model.names)
+        print(conf)
+        return bbox, conf
