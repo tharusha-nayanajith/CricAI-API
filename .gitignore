@@ -1,3 +1,4 @@
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -66,3 +67,17 @@ $RECYCLE.BIN/
 *.pt
 datasets/
 *.pkl
+
+#evaluation results
+evaluation_results/
+
+# YOLOv8 specific
+runs/
+wandb/
+
+# NumPy data files
+*.npz
+*.npy
+
+# Ignore everything inside trained_models
+trained_models/

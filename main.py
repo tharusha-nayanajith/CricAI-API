@@ -9,8 +9,9 @@ from routers import batting as batting_router
 from routers import action as action_router
 from routers import similarity as similarity_router
 from routers import stance_similarity as stance_similarity_router
+from dotenv import load_dotenv
 
-
+load_dotenv()
 app = FastAPI(title="CricAI Coach API", version="0.1.0")
 
 app.add_middleware(

@@ -30,3 +30,5 @@ Pillow==10.1.0         # For GIF generation
 
 # For AI feedback generation
 google-genai
+python-dotenv
+roboflow

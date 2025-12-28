@@ -57,6 +57,8 @@ class BattingService:
         
         # Initialize AI feedback (optional)
         api_key = os.getenv('GEMINI_API_KEY')
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY not set")
         self.ai_client = genai.Client(api_key=api_key) if api_key else None
         
         print("✓ Batting service initialized with prototype keypoints")
