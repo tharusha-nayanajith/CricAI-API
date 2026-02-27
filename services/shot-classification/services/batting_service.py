@@ -53,7 +53,7 @@ class BattingService:
         with open(f"{model_dir}/ensemble/feature_names.json", 'r') as f:
             self.feature_names = json.load(f)
         
-        # Load prototypes 
+        # Load prototypes
         self.prototypes = joblib.load(f"{model_dir}/prototypes/shot_prototypes.pkl")
         
         # Initialize components
@@ -70,7 +70,7 @@ class BattingService:
         
         self.skeleton_animator = SkeletonAnimator()
         
-        # Initialize  feedback 
+        # AI feedback
         api_key = os.getenv('GEMINI_API_KEY')
         if not api_key:
             raise RuntimeError("GEMINI_API_KEY not set")
@@ -85,7 +85,6 @@ class BattingService:
             model_path = f"{self.model_dir}/{model_name}/model_latest.pkl"
             if os.path.exists(model_path):
                 models[model_name] = joblib.load(model_path)
-                
         return models
     
     def process_video(self, video_path: str) -> Dict:
@@ -264,24 +263,23 @@ class BattingService:
         mistake_viz = self.prepare_mistake_visualization(mistakes)
         
         # Generate images (optional, for backward compatibility)
-        skeleton_3d = self.skeleton_animator.generate_3d_skeleton(
-            actual_keypoints,
-            mistakes,
-            view_angle=(30, 45)
-        )
+        # skeleton_3d = self.skeleton_animator.generate_3d_skeleton(
+        #     actual_keypoints,
+        #     mistakes,
+        #     view_angle=(30, 45)
+        # )
         
-        
-        comparison_view = self.skeleton_animator.generate_comparison_view(
-            actual_keypoints,
-            prototype_keypoints_2d,
-            mistakes
-        )
-        
-        # 3. Generate 360° animation
-        animation_360 = self.skeleton_animator.generate_multi_angle_animation(
-            actual_keypoints,
-            mistakes
-        )
+        # comparison_view = self.skeleton_animator.generate_comparison_view(
+        #     actual_keypoints,
+        #     prototype_keypoints_2d,
+        #     mistakes
+        # )
+
+        # # 3. Generate 360° animation
+        # animation_360 = self.skeleton_animator.generate_multi_angle_animation(
+        #     actual_keypoints,
+        #     mistakes
+        # )
         
         return {
             # For 3D Avatar Frontend (PRIMARY)
@@ -294,11 +292,11 @@ class BattingService:
             'joint_connections': self._get_skeleton_connections(),
             
             # For backward compatibility (OPTIONAL)
-            'legacy_images': {
-                'skeleton_3d': skeleton_3d,
-                'comparison_view': comparison_view,
-                'animation_360': animation_360
-            },
+            # 'legacy_images': {
+            #     'skeleton_3d': skeleton_3d,
+            #     'comparison_view': comparison_view,
+            #     'animation_360': animation_360
+            # },
             
             # Metadata
             'prototype_used': intended_shot,
@@ -340,7 +338,7 @@ class BattingService:
         ]
         
         return connections
-
+    
     def generate_ai_feedback(self, intended_shot: str, predicted_shot: str,
                            intent_score: float, mistakes: List[Dict]) -> str:
         """Generate AI feedback"""
@@ -426,7 +424,7 @@ Be direct, supportive, coaching-focused and technically accurate. No bullet poin
             ensemble_result['ensemble_probabilities']
         )
         
-        # Analyze mistakes 
+        # Analyze mistakes
         mistakes = self.mistake_analyzer.analyze_execution(
             intended_shot,
             ensemble_result['final_prediction'],
@@ -436,7 +434,6 @@ Be direct, supportive, coaching-focused and technically accurate. No bullet poin
         # Generate visual feedback (3D avatar ready)
         visual_feedback = self.generate_visual_feedback_for_frontend(
             video_data['contact_keypoints'],
-            video_data['contact_scores'],
             intended_shot,
             mistakes
         )

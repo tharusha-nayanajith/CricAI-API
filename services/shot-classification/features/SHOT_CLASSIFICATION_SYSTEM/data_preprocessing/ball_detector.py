@@ -4,15 +4,16 @@ Tier 1: Real bat + ball (YOLO)
 Tier 2: Virtual bat + ball (YOLO ball + pose bat)
 Tier 3: Fallback (hand velocity)
 """
+
 from anyio import Path
 import cv2
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 from ultralytics import YOLO
 import os
-from roboflow import Roboflow
 from features.SHOT_CLASSIFICATION_SYSTEM.data_preprocessing.kalman_ball_tracker import KalmanBallTracker
 from features.SHOT_CLASSIFICATION_SYSTEM.utils.config import MODEL_FOLDER_PATH
+
 class BallBatDetector:
     """
     3-Tier cricket contact detection:
@@ -27,7 +28,6 @@ class BallBatDetector:
             self.model = YOLO(model_path)
             print("✓ Loaded custom cricket detection model")
         else:
-            
             self.model = YOLO('yolov8n.pt')
             print("✓ Loaded YOLOv8 pretrained model")
 
@@ -60,7 +60,7 @@ class BallBatDetector:
                     )
         else:
             print("⚠️ Custom ball detector disabled, using main model for ball detection")
-
+    
     def detect_objects(self, frame: np.ndarray) -> Dict:
         """
         Detect ball and bat using YOLO models
@@ -68,12 +68,10 @@ class BallBatDetector:
         - Ball: Fallback to main YOLO model (if custom unavailable)
         - Bat: Main YOLO model
         """
-        
-        
         ball_bbox = None
         ball_conf = 0.0
 
-         # 1️⃣ Custom YOLOv8 ball detector (PRIMARY)
+        # 1️⃣ Custom YOLOv8 ball detector (PRIMARY)
         if self.yolo_ball_model is not None:
             yolo_result = self.detect_ball_yolov8(frame)
             if yolo_result is not None:
@@ -87,10 +85,10 @@ class BallBatDetector:
         for box in results.boxes:
             cls = int(box.cls[0])
             conf = float(box.conf[0])
-            bbox = box.xyxy[0].cpu().numpy()  
-            
-             # Bat detection (class IDs: 35=baseball bat, 37=tennis racket, 39=sports ball)
-            if cls in [35, 37, 39]:
+            bbox = box.xyxy[0].cpu().numpy()
+
+            # Bat detection (class IDs: 35=baseball bat, 37=tennis racket, 39=sports ball)
+            if cls in [35, 37, 39]:  
                 if conf > bat_conf:
                     bat_bbox = bbox
                     bat_conf = conf
@@ -101,8 +99,7 @@ class BallBatDetector:
                 if conf > ball_conf:
                     ball_bbox = bbox.astype(int)
                     ball_conf = conf
-            
-        
+
         return {
             "ball_bbox": ball_bbox,
             "ball_confidence": ball_conf,
@@ -116,7 +113,6 @@ class BallBatDetector:
         """
         keypoints = pose_data['keypoints']
         scores = pose_data['scores']
-        
         
         right_wrist = keypoints[10]
         left_wrist = keypoints[9]
@@ -151,7 +147,7 @@ class BallBatDetector:
         # Bat perpendicular width
         bat_width = 30
         
-        # Create bbox 
+        # Create bbox
         x_min = hand_center[0] - bat_width
         y_min = hand_center[1] - 50
         x_max = hand_center[0] + bat_width
@@ -159,7 +155,6 @@ class BallBatDetector:
         
         return np.array([x_min, y_min, x_max, y_max])
     
-
     def detect_contact_frame(self, frames: List[np.ndarray], 
                            pose_sequence: List[Dict]) -> Tuple[int, Dict]:
         """
@@ -171,9 +166,10 @@ class BallBatDetector:
         contact_scores_tier1 = []  # Real bat + ball
         contact_scores_tier2 = []  # Virtual bat + ball
         detections_log = []
+        
         ball_detected_count = 0
         real_bat_detected_count = 0
-
+        
         for i, frame in enumerate(frames):
             detection = self.detect_objects(frame)
             if detection['ball_bbox'] is not None:
@@ -197,14 +193,14 @@ class BallBatDetector:
             if detection['ball_bbox'] is not None:
                 ball_detected_count += 1
             if detection['bat_bbox'] is not None:
-                real_bat_detected_count += 
-
-            # Add virtual bat 
+                real_bat_detected_count += 1
+            
+            # Add virtual bat
             if i < len(pose_sequence):
                 detection['virtual_bat_bbox'] = self.get_virtual_bat_bbox(pose_sequence[i])
             else:
                 detection['virtual_bat_bbox'] = None
-
+            
             detections_log.append(detection)
             
             # Calculate scores for both tiers
@@ -237,7 +233,6 @@ class BallBatDetector:
         
         # TIER 3: Fallback (acceleration + direction change)
         else:
-            
             contact_idx = self._fallback_detection(pose_sequence)
             method = 'tier3_acceleration_direction_change'
             print(f"⚠️  Tier 3: Fallback to acceleration + direction change (ball detection too low: {ball_rate:.1f}%)")
@@ -304,9 +299,9 @@ class BallBatDetector:
         # Need ball detected
         if ball_bbox is None:
             return 0.0
-
+        
         score = 0.0
-
+        
         # 1. Ball confidence
         ball_conf = detection.get("ball_confidence", 0.0)
         score += ball_conf * 0.4
@@ -318,17 +313,14 @@ class BallBatDetector:
         
         # 3. Ball-virtual bat interaction
         if virtual_bat_bbox is not None:
-            
             distance = self._bbox_distance(ball_bbox, virtual_bat_bbox)
             proximity = np.exp(-distance / 80.0)
             score += proximity * 0.3
             
-            # IoU (if they overlap)
             iou = self._calculate_iou(ball_bbox, virtual_bat_bbox)
             score += iou * 0.3
         
         return float(np.clip(score, 0.0, 1.0))
-
     
     def _calculate_iou(self, bbox1: np.ndarray, bbox2: np.ndarray) -> float:
         """Calculate IoU"""
@@ -358,7 +350,6 @@ class BallBatDetector:
         keypoints = pose_data['keypoints']
         scores = pose_data['scores']
         
-        
         right_wrist = keypoints[10]
         left_wrist = keypoints[9]
         
@@ -370,7 +361,6 @@ class BallBatDetector:
             (ball_bbox[1] + ball_bbox[3]) / 2
         ])
         
-        
         distances = []
         if scores[10] > 0.3:
             distances.append(np.linalg.norm(ball_center - right_wrist))
@@ -381,15 +371,13 @@ class BallBatDetector:
             return 0.0
         
         min_distance = min(distances)
-        
-        
         return max(0, 1 - (min_distance / 150))
     
     def _fallback_detection(self, pose_sequence: List[Dict]) -> int:
         """Tier 3: Detects impact via acceleration + direction change"""
         if len(pose_sequence) < 4:
             return len(pose_sequence) // 2
-        
+
         scores = []
 
         for i in range(2, len(pose_sequence) - 1):
@@ -414,11 +402,10 @@ class BallBatDetector:
     def detect_ball_yolov8(
         self, frame: np.ndarray
     ) -> Optional[Tuple[np.ndarray, float]]:
-
-         """Detect ball using trained YOLOv8 model"""
+        """Detect ball using trained YOLOv8 model"""
         if self.yolo_ball_model is None:
             return None
-
+        
         # Run YOLOv8 inference
         results = self.yolo_ball_model.predict(
             frame,
@@ -443,14 +430,10 @@ class BallBatDetector:
         conf = float(confidences[best_idx])
         
         # Convert to [x1, y1, x2, y2] integer format
-
         bbox = np.array([
             int(xyxy[0]),  # x1
             int(xyxy[1]),  # y1
             int(xyxy[2]),  # x2
             int(xyxy[3])   # y2
         ])
-
-        print(self.yolo_ball_model.names)
-        print(conf)
         return bbox, conf

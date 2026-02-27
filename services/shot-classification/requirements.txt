@@ -13,6 +13,8 @@ scikit-learn==1.3.2
 joblib==1.3.2
 Pillow==10.1.0
 opencv-python==4.8.1.78
+munkres
+xtcocotools
 
 # === 3. OpenMMLab Dependencies ===
 openmim

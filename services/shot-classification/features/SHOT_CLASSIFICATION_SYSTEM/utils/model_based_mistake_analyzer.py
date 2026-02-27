@@ -7,7 +7,6 @@ from typing import Dict, List, Tuple
 import joblib
 
 
-
 class ModelBasedMistakeAnalyzer:
     """Analyze mistakes using MODEL'S learned knowledge"""
     
@@ -32,7 +31,7 @@ class ModelBasedMistakeAnalyzer:
         
         # Map features to body parts
         self.feature_to_bodypart = self._map_features_to_bodyparts()
-
+        
         # Map body parts to joint IDs for visualization
         self.bodypart_to_joint_id = {
             'Front Elbow': 'front_elbow',
@@ -58,7 +57,6 @@ class ModelBasedMistakeAnalyzer:
     def _map_features_to_bodyparts(self) -> Dict[str, str]:
         """Map feature names to body parts"""
         mapping = {}
-        
         for feat_name in self.feature_names:
             if 'front_elbow' in feat_name:
                 mapping[feat_name] = 'Front Elbow'
@@ -79,7 +77,6 @@ class ModelBasedMistakeAnalyzer:
                     mapping[feat_name] = 'Back Wrist'
             else:
                 mapping[feat_name] = 'Body Position'
-        
         return mapping
     
     def analyze_execution(self, intended_shot: str, actual_shot: str,
@@ -114,7 +111,6 @@ class ModelBasedMistakeAnalyzer:
             deviation = feature_diffs[feat_idx]
             
             # Better severity calculation
-            
             std_dev = self._get_feature_std(intended_shot, feat_idx)
             
             # Normalized deviation (how many standard deviations away)
@@ -137,7 +133,7 @@ class ModelBasedMistakeAnalyzer:
                 
                 mistake = {
                     'body_part': body_part,
-                    'joint_id': joint_id,
+                    'joint_id': joint_id, 
                     'feature_name': feat_name,
                     'severity': severity,
                     'severity_score': float(severity_score),
@@ -179,31 +175,24 @@ class ModelBasedMistakeAnalyzer:
     def _generate_explanation(self, feature_name: str, deviation: float,
                              intended_shot: str, actual_shot: str) -> str:
         """Generate explanation"""
-        
         direction = "higher" if deviation > 0 else "lower"
         body_part = self.feature_to_bodypart.get(feature_name, feature_name)
         
         # Context-aware explanations
         if 'angular_change' in feature_name:
             return f"Your {body_part} rotation was {direction} than expected for a {intended_shot}, causing the shot to resemble a {actual_shot}"
-        
         elif 'velocity' in feature_name:
             return f"Your {body_part} moved too {'fast' if deviation > 0 else 'slow'} during execution"
-        
         elif 'contact_' in feature_name:
             if 'elbow' in feature_name or 'knee' in feature_name:
                 return f"At contact, your {body_part} angle was too {'straight' if deviation > 0 else 'bent'} for a {intended_shot}"
-            
             else:
-                rreturn f"Your {body_part} positioning at contact deviated from ideal {intended_shot} form"
-        
+                return f"Your {body_part} positioning at contact deviated from ideal {intended_shot} form"
         else:
             return f"Your {body_part} positioning differed from optimal {intended_shot} execution"
     
     def _generate_recommendation(self, feature_name: str, deviation: float, intended_shot: str) -> str:
         """Generate actionable advice"""
-        
-        direction = "more" if deviation < 0 else "less"
         body_part = self.feature_to_bodypart.get(feature_name, feature_name)
         
         recommendations = {
@@ -215,8 +204,9 @@ class ModelBasedMistakeAnalyzer:
                 'positive': 'Keep back elbow higher during backswing for more power.',
                 'negative': 'Lower your back elbow slightly. Over-extension reduces control.'
             },
-            'Back Elbow': {
-                'positive': 'Keep back elbow higher during backswing for more power.',
+            'Front Knee': {
+                'positive': 'Transfer weight forward with a more bent front leg.',
+                'negative': 'Straighten front leg more at contact for a firmer base.'
             },
             'Torso': {
                 'positive': 'Stay more upright. Excessive bending affects timing.',
@@ -253,11 +243,9 @@ class ModelBasedMistakeAnalyzer:
         if critical:
             summary_parts.append(f"🔴 Critical ({len(critical)}): " + 
                                ", ".join([m['body_part'] for m in critical]))
-        
         if major:
             summary_parts.append(f"🟡 Major ({len(major)}): " + 
                                ", ".join([m['body_part'] for m in major]))
-
         if minor:
             summary_parts.append(f"🟢 Minor ({len(minor)}): " + 
                                ", ".join([m['body_part'] for m in minor]))
@@ -269,7 +257,7 @@ class ModelBasedMistakeAnalyzer:
             summary += f"\n\nPriority: Focus on {mistakes[0]['body_part']} first."
         
         return summary
-
+    
     def calculate_overall_score(self, intended_shot: str, 
                                actual_features: np.ndarray) -> float:
         """
