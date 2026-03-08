@@ -43,7 +43,7 @@ class FrameExtractor:
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
         # Calculate frame interval
-        frame_interval = max(1, int(original_fps / self.fps))
+        frame_interval = 2
         
         frames = []
         frame_count = 0
