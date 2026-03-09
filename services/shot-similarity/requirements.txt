@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+python-multipart
+mediapipe
+opencv-python
+numpy
+pydantic
+
+# Impact detection dependencies
+moviepy          # Video-to-audio extraction
+librosa          # Audio analysis
+scipy            # Signal filtering (high-pass) + peak detection
+ultralytics      # YOLOv8 ball detection
