@@ -31,3 +31,6 @@ Thumbs.db
 # Local environment
 .env
 .env.*
+
+# Local test scripts and sample assets
+Test_Scripts/
