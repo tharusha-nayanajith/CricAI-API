@@ -1,0 +1,1 @@
+"""Shot classifier module package."""

@@ -1,0 +1,1 @@
+"""CrickAI backend application package."""

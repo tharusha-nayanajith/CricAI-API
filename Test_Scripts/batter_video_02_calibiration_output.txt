@@ -1,0 +1,29 @@
+=== Calibration Output ===
+Timestamp: 2026-03-26T06:49:02.149164
+Session: ggh
+Pitch: 20 yards
+Success: true
+
+--- Calibration Result ---
+Score: 9.98974609375
+FOV: 0.0
+Yaw: 33.30407525600695
+Image Size: [720, 1280]
+Position: [-0.021922183912738515, 1.7239466509434653, 16.580584411256854]
+Principal Point: [360.0, 640.0]
+Rotation: [6.24138614808657, -0.008511044783384367, 0.02637870774577589]
+Detected Channels: 11
+Total Detections: 11
+
+--- Keypoints (11) ---
+Ch 0: x=382.0, y=690.0, score=0.9268
+Ch 1: x=384.0, y=631.0, score=0.9937
+Ch 2: x=377.0, y=690.0, score=0.9644
+Ch 3: x=378.0, y=632.0, score=0.9951
+Ch 4: x=371.0, y=689.0, score=0.9712
+Ch 5: x=373.0, y=632.0, score=0.9961
+Ch 6: x=415.0, y=1111.0, score=0.9204
+Ch 7: x=410.0, y=880.0, score=0.8462
+Ch 8: x=386.0, y=1111.0, score=0.9604
+Ch 9: x=376.0, y=883.0, score=0.5835
+Ch 10: x=354.0, y=1111.0, score=0.8320

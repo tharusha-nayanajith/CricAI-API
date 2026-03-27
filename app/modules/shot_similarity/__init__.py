@@ -1,0 +1,1 @@
+"""Shot similarity module package."""

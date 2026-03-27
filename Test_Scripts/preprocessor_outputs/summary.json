@@ -1,0 +1,51 @@
+[
+  {
+    "video": "batter_video_01.mp4",
+    "calibration": "batter_video_01_calibiration_output.txt",
+    "standardized_video": "batter_video_01.mp4",
+    "batter_mode": "present",
+    "batter_roi": {
+      "x": 306,
+      "y": 468,
+      "width": 80,
+      "height": 183
+    },
+    "release_frame": "batter_video_01_release.jpg",
+    "release_frame_shape": [
+      1280,
+      720,
+      3
+    ]
+  },
+  {
+    "video": "batter_video_02.mp4",
+    "calibration": "batter_video_02_calibiration_output.txt",
+    "standardized_video": "batter_video_02.mp4",
+    "batter_mode": "present",
+    "batter_roi": {
+      "x": 337,
+      "y": 572,
+      "width": 80,
+      "height": 177
+    },
+    "release_frame": "batter_video_02_release.jpg",
+    "release_frame_shape": [
+      1280,
+      720,
+      3
+    ]
+  },
+  {
+    "video": "bowler_video_01.mp4",
+    "calibration": "bowler_video_01_calibiration_output.txt",
+    "standardized_video": "bowler_video_01_standardized.mp4",
+    "batter_mode": "none",
+    "batter_roi": null,
+    "release_frame": "bowler_video_01_release.jpg",
+    "release_frame_shape": [
+      1280,
+      720,
+      3
+    ]
+  }
+]
