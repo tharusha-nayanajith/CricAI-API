@@ -78,13 +78,14 @@ def build_pitch_frame(
     length_reliable = measured_pitch_length is not None and (
         abs(measured_pitch_length - PITCH_LENGTH_METRES) <= PITCH_LENGTH_TOLERANCE_METRES
     )
+    lateral_sign = _lateral_axis_sign(calibration)
 
     return PitchFrame(
         batting_origin_world=np.array(
             [0.0, 0.0, BATTING_STUMP_Z_METRES],
             dtype=np.float64,
         ),
-        x_axis_world=np.array([1.0, 0.0, 0.0], dtype=np.float64),
+        x_axis_world=np.array([lateral_sign, 0.0, 0.0], dtype=np.float64),
         z_axis_world=np.array([0.0, 0.0, 1.0], dtype=np.float64),
         scale=1.0,
         measured_pitch_length=measured_pitch_length,
@@ -96,9 +97,9 @@ def build_pitch_frame(
 
 def world_to_pitch(point_world: np.ndarray, frame: PitchFrame) -> np.ndarray:
     relative = np.asarray(point_world, dtype=np.float64) - frame.batting_origin_world
-    # Match the stadium/pitch-map convention so the rendered lateral direction
-    # lines up with the real video without a manual left-right flip.
-    pitch_x = float(-np.dot(relative, frame.x_axis_world))
+    # FullTrack's canonical world frame already defines x < 0 as off side and
+    # x > 0 as leg side, so preserve the lateral sign directly.
+    pitch_x = float(np.dot(relative, frame.x_axis_world))
     pitch_z = float(np.dot(relative, frame.z_axis_world))
     return np.array([pitch_x, 0.0, pitch_z], dtype=np.float64)
 
@@ -147,3 +148,10 @@ def _measured_pitch_length(
     if length < 1e-6:
         return None
     return length
+
+
+def _lateral_axis_sign(calibration: CalibrationData) -> float:
+    # FullTrack calibrations can arrive with opposite in-plane camera rotation
+    # signs for visually mirrored videos. Normalize pitch-map x so all videos
+    # share one lateral convention.
+    return -1.0 if calibration.rotation[2] > 0.0 else 1.0

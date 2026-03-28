@@ -5,7 +5,7 @@ import numpy as np
 from loguru import logger
 
 from app.exceptions import PreprocessingError
-from app.models.calibration import CalibrationData
+from app.models.calibration import CalibrationData, Keypoint
 from app.modules.preprocessor.constants import STANDARDIZED_HEIGHT, STANDARDIZED_WIDTH
 from app.modules.preprocessor.models import BatterMode, BatterROI
 
@@ -16,12 +16,23 @@ class BatterDetector:
     SAMPLE_WINDOW_START = 0.15
     SAMPLE_WINDOW_END = 0.50
     VOTE_THRESHOLD = 3
+    ROI_CHANNELS = {0, 1, 2, 3, 4, 5}
+    REPROJECTION_ERROR_THRESHOLD_PX = 40.0
+    MIN_DETECTED_POINTS_FOR_FALLBACK = 4
+    STRIKER_STUMP_WORLD_POINTS = {
+        0: (-0.0954, 0.0, -10.059),
+        1: (-0.0954, 0.711, -10.059),
+        2: (0.0, 0.0, -10.059),
+        3: (0.0, 0.711, -10.059),
+        4: (0.0954, 0.0, -10.059),
+        5: (0.0954, 0.711, -10.059),
+    }
 
     def __init__(self, posenet_interpreter) -> None:
         self._interpreter = posenet_interpreter
 
     def derive_roi(self, calibration: CalibrationData) -> BatterROI:
-        stump_kps = [kp for kp in calibration.keypoints if kp.channel_index in {0, 1, 2, 3, 4, 5}]
+        stump_kps = self._roi_keypoints_in_frame_space(calibration)
         if len(stump_kps) < 2:
             raise PreprocessingError(
                 "At least 2 stump keypoints from channels 0-5 are required to derive batter ROI."
@@ -54,6 +65,121 @@ class BatterDetector:
             roi.height,
         )
         return roi
+
+    def _roi_keypoints_in_frame_space(self, calibration: CalibrationData) -> list[Keypoint]:
+        image_width = calibration.image_size[0]
+        return [
+            keypoint.model_copy(
+                update={"x": float((image_width - 1) - keypoint.x)},
+            )
+            for keypoint in self._select_roi_keypoints(calibration)
+        ]
+
+    def _select_roi_keypoints(self, calibration: CalibrationData) -> list[Keypoint]:
+        detected = [
+            kp
+            for kp in calibration.keypoints
+            if kp.channel_index in self.ROI_CHANNELS
+            and kp.score >= self.KEYPOINT_SCORE_THRESHOLD
+        ]
+        projected = self._project_striker_keypoints(calibration)
+        if len(projected) < 2:
+            return detected
+        if calibration.detected_channels < self.MIN_DETECTED_POINTS_FOR_FALLBACK:
+            return detected
+        if len(detected) < 2:
+            logger.info(
+                "Using reprojected striker keypoints for ROI because only {} "
+                "detected points passed the score threshold.",
+                len(detected),
+            )
+            return projected
+
+        projected_by_channel = {kp.channel_index: kp for kp in projected}
+        shared_errors = [
+            float(
+                np.hypot(
+                    detected_kp.x - projected_by_channel[detected_kp.channel_index].x,
+                    detected_kp.y - projected_by_channel[detected_kp.channel_index].y,
+                )
+            )
+            for detected_kp in detected
+            if detected_kp.channel_index in projected_by_channel
+        ]
+        if len(shared_errors) < 2:
+            return detected
+
+        median_error = float(np.median(shared_errors))
+        if not np.isfinite(median_error):
+            return detected
+        if median_error > self.REPROJECTION_ERROR_THRESHOLD_PX:
+            logger.info(
+                "Using reprojected striker keypoints for ROI because median "
+                "striker reprojection error is {:.1f}px.",
+                median_error,
+            )
+            return projected
+        return detected
+
+    def _project_striker_keypoints(self, calibration: CalibrationData) -> list[Keypoint]:
+        if calibration.fov <= 0.0:
+            return []
+        focal_length = self._fovy_to_focal(calibration.fov, calibration.image_size[1])
+        if not np.isfinite(focal_length) or focal_length <= 0.0:
+            return []
+        principal_x, principal_y = calibration.principal_point
+        position = np.array(calibration.position, dtype=np.float64).reshape(3, 1)
+        rotation = self._euler_to_rotation(np.array(calibration.rotation, dtype=np.float64))
+
+        projected = []
+        for channel_index, world_point in self.STRIKER_STUMP_WORLD_POINTS.items():
+            world = np.array(world_point, dtype=np.float64).reshape(3, 1)
+            camera_point = rotation @ world - rotation @ position
+            if camera_point[2, 0] <= 1e-9:
+                continue
+            u_coord = (camera_point[0, 0] / camera_point[2, 0]) * focal_length + principal_x
+            v_coord = (camera_point[1, 0] / camera_point[2, 0]) * focal_length + principal_y
+            if not np.isfinite(u_coord) or not np.isfinite(v_coord):
+                continue
+            projected.append(
+                Keypoint(
+                    x=float(u_coord),
+                    y=float(v_coord),
+                    score=1.0,
+                    channel_index=channel_index,
+                )
+            )
+        return projected
+
+    @staticmethod
+    def _euler_to_rotation(rotation_euler: np.ndarray) -> np.ndarray:
+        rx, ry, rz = rotation_euler[0], rotation_euler[1], rotation_euler[2]
+        cos_z = np.cos(rz)
+        sin_z = np.sin(rz)
+        cos_y = np.cos(ry)
+        sin_y = np.sin(ry)
+        cos_x = np.cos(rx)
+        sin_x = np.sin(rx)
+        return np.array(
+            [
+                [cos_z * cos_y, sin_z * cos_y, -sin_y],
+                [
+                    (-cos_z) * sin_y * sin_x + sin_z * cos_x,
+                    (-cos_z) * cos_x - (sin_z * sin_y) * sin_x,
+                    (-cos_y) * sin_x,
+                ],
+                [
+                    (-sin_z) * sin_x - (cos_z * sin_y) * cos_x,
+                    (-sin_z) * sin_y * cos_x + cos_z * sin_x,
+                    (-cos_y) * cos_x,
+                ],
+            ],
+            dtype=np.float64,
+        )
+
+    @staticmethod
+    def _fovy_to_focal(fovy_deg: float, image_height: int) -> float:
+        return image_height / (2.0 * np.tan(np.deg2rad(fovy_deg) / 2.0))
 
     def detect(
         self,

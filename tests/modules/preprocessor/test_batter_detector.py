@@ -65,13 +65,18 @@ def _make_calibration(points: list[tuple[float, float, int]]):
         KeypointFactory(x=x, y=y, channel_index=channel_index)
         for x, y, channel_index in points
     ]
-    return calibration.model_copy(update={"keypoints": keypoints})
+    return calibration.model_copy(
+        update={
+            "image_size": (STANDARDIZED_WIDTH, STANDARDIZED_HEIGHT),
+            "keypoints": keypoints,
+        }
+    )
 
 
 def test_derive_roi_returns_expected_box_dimensions() -> None:
     detector = BatterDetector(_FakeInterpreter(np.zeros((1, 1, 17, 3), dtype=np.float32)))
     calibration = _make_calibration(
-        [(100.0, 200.0, 0), (120.0, 210.0, 1), (110.0, 205.0, 2)],
+        [(619.0, 200.0, 0), (599.0, 210.0, 1), (609.0, 205.0, 2)],
     )
 
     roi = detector.derive_roi(calibration)
@@ -84,7 +89,7 @@ def test_derive_roi_returns_expected_box_dimensions() -> None:
 
 def test_derive_roi_raises_with_fewer_than_two_stump_keypoints() -> None:
     detector = BatterDetector(_FakeInterpreter(np.zeros((1, 1, 17, 3), dtype=np.float32)))
-    calibration = _make_calibration([(100.0, 200.0, 0)])
+    calibration = _make_calibration([(619.0, 200.0, 0)])
 
     with pytest.raises(PreprocessingError, match="At least 2 stump keypoints"):
         detector.derive_roi(calibration)
@@ -92,12 +97,83 @@ def test_derive_roi_raises_with_fewer_than_two_stump_keypoints() -> None:
 
 def test_derive_roi_applies_minimum_floor() -> None:
     detector = BatterDetector(_FakeInterpreter(np.zeros((1, 1, 17, 3), dtype=np.float32)))
-    calibration = _make_calibration([(50.0, 60.0, 0), (50.0, 60.0, 1)])
+    calibration = _make_calibration([(669.0, 60.0, 0), (669.0, 60.0, 1)])
 
     roi = detector.derive_roi(calibration)
 
     assert roi.width == 80
     assert roi.height == 120
+
+
+def test_derive_roi_falls_back_to_reprojected_keypoints_when_detected_points_are_far(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    detector = BatterDetector(_FakeInterpreter(np.zeros((1, 1, 17, 3), dtype=np.float32)))
+    calibration = _make_calibration(
+        [(300.0, 500.0, 0), (320.0, 510.0, 1), (310.0, 505.0, 2)],
+    ).model_copy(update={"detected_channels": 6})
+    projected = [
+        KeypointFactory(x=619.0, y=200.0, channel_index=0),
+        KeypointFactory(x=599.0, y=210.0, channel_index=1),
+        KeypointFactory(x=609.0, y=205.0, channel_index=2),
+    ]
+
+    monkeypatch.setattr(detector, "_project_striker_keypoints", lambda _: projected)
+
+    roi = detector.derive_roi(calibration)
+
+    assert roi.width == 80
+    assert roi.height == 120
+    assert roi.x == 70
+    assert roi.y == 145
+
+
+def test_derive_roi_uses_detected_keypoints_when_they_match_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    detector = BatterDetector(_FakeInterpreter(np.zeros((1, 1, 17, 3), dtype=np.float32)))
+    calibration = _make_calibration(
+        [(619.0, 200.0, 0), (599.0, 210.0, 1), (609.0, 205.0, 2)],
+    ).model_copy(update={"detected_channels": 6})
+    projected = [
+        KeypointFactory(x=617.0, y=201.0, channel_index=0),
+        KeypointFactory(x=597.0, y=212.0, channel_index=1),
+        KeypointFactory(x=608.0, y=206.0, channel_index=2),
+    ]
+
+    monkeypatch.setattr(detector, "_project_striker_keypoints", lambda _: projected)
+
+    roi = detector.derive_roi(calibration)
+
+    assert roi.width == 80
+    assert roi.height == 120
+    assert roi.x == 70
+    assert roi.y == 145
+
+
+def test_derive_roi_ignores_projection_fallback_when_fov_is_invalid() -> None:
+    detector = BatterDetector(_FakeInterpreter(np.zeros((1, 1, 17, 3), dtype=np.float32)))
+    calibration = _make_calibration(
+        [(619.0, 200.0, 0), (599.0, 210.0, 1), (609.0, 205.0, 2)],
+    ).model_copy(update={"fov": 0.0, "detected_channels": 6})
+
+    roi = detector.derive_roi(calibration)
+
+    assert roi.width == 80
+    assert roi.height == 120
+    assert roi.x == 70
+    assert roi.y == 145
+
+
+def test_roi_keypoints_in_frame_space_unflips_x_coordinates() -> None:
+    detector = BatterDetector(_FakeInterpreter(np.zeros((1, 1, 17, 3), dtype=np.float32)))
+    calibration = _make_calibration(
+        [(619.0, 200.0, 0), (599.0, 210.0, 1), (609.0, 205.0, 2)],
+    )
+
+    keypoints = detector._roi_keypoints_in_frame_space(calibration)
+
+    assert [round(keypoint.x, 1) for keypoint in keypoints] == [100.0, 120.0, 110.0]
 
 
 def test_sample_frame_indices_are_evenly_spaced_within_window() -> None:

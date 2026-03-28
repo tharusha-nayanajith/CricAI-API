@@ -67,6 +67,31 @@ def test_build_pitch_frame_uses_canonical_stump_world_and_reports_measured_lengt
     assert frame.length_reliable is True
 
 
+def test_build_pitch_frame_flips_lateral_axis_for_positive_rotation_z(monkeypatch) -> None:
+    calibration = _calibration().model_copy(update={"rotation": (0.0, 0.0, 0.1)})
+    lookup = {
+        (300.0, 800.0): np.array([-0.0954, 0.0, -10.059], dtype=np.float64),
+        (320.0, 800.0): np.array([0.0, 0.0, -10.059], dtype=np.float64),
+        (340.0, 800.0): np.array([0.0954, 0.0, -10.059], dtype=np.float64),
+        (300.0, 200.0): np.array([-0.0954, 0.0, 10.059], dtype=np.float64),
+        (320.0, 200.0): np.array([0.0, 0.0, 10.059], dtype=np.float64),
+        (340.0, 200.0): np.array([0.0954, 0.0, 10.059], dtype=np.float64),
+    }
+
+    monkeypatch.setattr(
+        "app.modules.bowler_performance.camera.unproject_to_ground",
+        lambda x_val, y_val, K, RT: lookup[(x_val, y_val)],
+    )
+
+    frame = build_pitch_frame(
+        calibration,
+        np.eye(3),
+        np.hstack([np.eye(3), np.zeros((3, 1))]),
+    )
+
+    assert np.allclose(frame.x_axis_world, np.array([-1.0, 0.0, 0.0], dtype=np.float64))
+
+
 def test_world_points_to_pitch_points_rebases_world_z_to_batting_end() -> None:
     frame = build_pitch_frame(
         _calibration(),
@@ -83,5 +108,5 @@ def test_world_points_to_pitch_points_rebases_world_z_to_batting_end() -> None:
 
     pitch_points = world_points_to_pitch_points(world_points, frame)
 
-    assert pitch_points[0][1][0] == -0.5
+    assert pitch_points[0][1][0] == 0.5
     assert pitch_points[0][1][2] == 5.0

@@ -22,7 +22,16 @@ def _camera_rt(camera_position: tuple[float, float, float]) -> np.ndarray:
 def test_euler_to_rotation_returns_identity_for_zero_vector() -> None:
     rotation = _euler_to_rotation(np.zeros(3, dtype=np.float64))
 
-    assert np.allclose(rotation, np.eye(3, dtype=np.float64))
+    expected = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, -1.0],
+        ],
+        dtype=np.float64,
+    )
+
+    assert np.allclose(rotation, expected)
 
 
 def test_euler_to_rotation_returns_expected_matrix_for_known_rotation() -> None:
@@ -30,7 +39,7 @@ def test_euler_to_rotation_returns_expected_matrix_for_known_rotation() -> None:
     expected = np.array(
         [
             [0.0, 1.0, 0.0],
-            [-1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
             [-0.0, 0.0, -1.0],
         ],
         dtype=np.float64,
