@@ -202,6 +202,7 @@ class ReleaseDetector:
             hand_position=hand_position,
             confidence=float(prob),
             annotated_frame=annotated,
+            raw_frame=frame_bgr.copy(),
         )
 
     def reset(self) -> None:

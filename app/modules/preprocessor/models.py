@@ -12,6 +12,7 @@ class ReleasePoint:
     hand_position: tuple[float, float]
     confidence: float
     annotated_frame: np.ndarray
+    raw_frame: np.ndarray | None = None
 
 
 @dataclass(slots=True)

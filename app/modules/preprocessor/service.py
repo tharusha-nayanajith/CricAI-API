@@ -105,7 +105,12 @@ class VideoPreprocessor:
         logger.info("Completed video standardization: {}", standardized_path)
         return standardized_path
 
-    async def run(self, video_path: Path, calibration: CalibrationData) -> VideoArtifacts:
+    async def run(
+        self,
+        video_path: Path,
+        calibration: CalibrationData,
+        require_ball_path: bool = True,
+    ) -> VideoArtifacts:
         self._release_frame = None
         self._release_point = None
         std_path = await self.standardize_video(video_path)
@@ -123,6 +128,17 @@ class VideoPreprocessor:
             fps=await loop.run_in_executor(None, partial(self._read_fps, std_path)),
         )
         ctx.release_point = await self._detect_release(ctx)
+        if not require_ball_path:
+            self._release_frame = ctx.release_point.annotated_frame
+            self._release_point = ctx.release_point
+            return VideoArtifacts(
+                release_frame=ctx.release_point.annotated_frame,
+                ball_path=[],
+                bat_contact_frame=None,
+                release_point=ctx.release_point,
+                bat_contact=None,
+            )
+
         ball_tracker = get_ball_tracker()
         raw_path = await loop.run_in_executor(
             None,
@@ -162,6 +178,8 @@ class VideoPreprocessor:
             bat_contact_frame=(
                 ctx.bat_contact.annotated_frame if ctx.bat_contact is not None else None
             ),
+            release_point=ctx.release_point,
+            bat_contact=ctx.bat_contact,
         )
 
     async def _detect_release(self, ctx: DeliveryContext) -> ReleasePoint:

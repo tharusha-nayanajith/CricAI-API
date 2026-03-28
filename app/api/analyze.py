@@ -15,6 +15,7 @@ from app.exceptions import FeatureError
 from app.models.artifacts import VideoArtifacts
 from app.models.calibration import CalibrationData
 from app.models.job import FeatureResult
+from app.modules.action_legality.service import ActionLegalityService
 from app.modules.bowler_performance.service import BowlerPerformanceAnalyzer
 from app.modules.preprocessor.models import BallDetection
 from app.modules.preprocessor.service import VideoPreprocessor
@@ -34,6 +35,7 @@ ALL_FEATURES = {
 }
 _preprocessor = VideoPreprocessor()
 _bowler_analyzer = BowlerPerformanceAnalyzer()
+_action_legality_service = ActionLegalityService()
 
 
 def _write_video_bytes(video_path: Path, video_bytes: bytes) -> None:
@@ -83,6 +85,35 @@ async def run_bowler_performance(
         )
 
 
+async def run_action_legality(
+    job_id: str,
+    artifacts: VideoArtifacts,
+    video_url: str,
+) -> None:
+    await set_feature_status(job_id, "action_legality", "processing")
+    try:
+        result = await _action_legality_service.run(artifacts, video_url=video_url)
+        await store_result(
+            job_id,
+            "action_legality",
+            FeatureResult(status="done", result=result.model_dump()),
+        )
+    except FeatureError as exc:
+        logger.error("action_legality failed for {}: {}", job_id, exc)
+        await store_result(
+            job_id,
+            "action_legality",
+            FeatureResult(status="failed", error=str(exc)),
+        )
+    except Exception as exc:
+        logger.exception("Unexpected action_legality failure for {}", job_id)
+        await store_result(
+            job_id,
+            "action_legality",
+            FeatureResult(status="failed", error=str(exc)),
+        )
+
+
 async def process_job(
     job_id: str,
     selected_features: list[str],
@@ -91,7 +122,12 @@ async def process_job(
     calibration: CalibrationData,
 ) -> None:
     logger.info("Queued job {} with features {}", job_id, selected_features)
-    if "bowler_performance" not in selected_features:
+    implemented_features = [
+        feature_name
+        for feature_name in selected_features
+        if feature_name in {"bowler_performance", "action_legality"}
+    ]
+    if not implemented_features:
         logger.info("No implemented background features selected for {}", job_id)
         return
 
@@ -102,17 +138,25 @@ async def process_job(
 
     try:
         await loop.run_in_executor(None, partial(_write_video_bytes, video_path, video_bytes))
-        artifacts = await _preprocessor.run(video_path, calibration)
+        artifacts = await _preprocessor.run(
+            video_path,
+            calibration,
+            require_ball_path="bowler_performance" in implemented_features,
+        )
     except Exception as exc:
         logger.error("Preprocessor failed for {}: {}", job_id, exc)
-        await store_result(
-            job_id,
-            "bowler_performance",
-            FeatureResult(status="failed", error=f"Preprocessor failed: {exc}"),
-        )
+        for feature_name in implemented_features:
+            await store_result(
+                job_id,
+                feature_name,
+                FeatureResult(status="failed", error=f"Preprocessor failed: {exc}"),
+            )
     else:
-        fps = _derive_fps(artifacts.ball_path)
-        await run_bowler_performance(job_id, artifacts, calibration, fps)
+        if "bowler_performance" in implemented_features:
+            fps = _derive_fps(artifacts.ball_path)
+            await run_bowler_performance(job_id, artifacts, calibration, fps)
+        if "action_legality" in implemented_features:
+            await run_action_legality(job_id, artifacts, safe_name)
     finally:
         await loop.run_in_executor(None, partial(_cleanup_job_dir, job_dir))
 

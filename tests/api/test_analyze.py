@@ -1,7 +1,12 @@
 import json
 
+import numpy as np
 import pytest
 
+import app.api.analyze as analyze_module
+from app.modules.action_legality.models import ActionLegalityResult
+from app.modules.preprocessor.models import ReleasePoint
+from app.storage.results import get_job_status, initialize_job_status
 from tests.conftest import CalibrationDataFactory
 
 
@@ -30,3 +35,73 @@ async def test_analyze_with_malformed_calibration_returns_422(test_client) -> No
     )
 
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_process_job_runs_action_legality_without_ball_tracking(
+    fake_redis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ = fake_redis
+    calibration = CalibrationDataFactory()
+    job_id = "action-only-job"
+    recorded_require_ball_path: list[bool] = []
+
+    async def fake_preprocessor_run(video_path, calibration_data, require_ball_path=True):
+        _ = video_path, calibration_data
+        recorded_require_ball_path.append(require_ball_path)
+        annotated = np.zeros((4, 4, 3), dtype=np.uint8)
+        raw = np.ones((4, 4, 3), dtype=np.uint8)
+        return analyze_module.VideoArtifacts(
+            release_frame=annotated,
+            ball_path=[],
+            bat_contact_frame=None,
+            release_point=ReleasePoint(
+                frame_idx=7,
+                timestamp_s=0.23,
+                hand_position=(10.0, 20.0),
+                confidence=0.91,
+                annotated_frame=annotated,
+                raw_frame=raw,
+            ),
+        )
+
+    async def fake_action_legality_run(artifacts, video_url=None):
+        _ = artifacts, video_url
+        return ActionLegalityResult(
+            verdict="legal",
+            illegal_probability=0.11,
+            legal_probability=0.89,
+            confidence=0.89,
+            release_frame_index=7,
+            release_timestamp_s=0.23,
+            release_confidence=0.91,
+            selected_landmarks=[11, 13, 15, 12, 14, 16, 23, 25, 27],
+            normalized_keypoints=[0.0] * 27,
+            video_url="upload.mp4",
+            used_annotated_release_frame=False,
+        )
+
+    monkeypatch.setattr(analyze_module._preprocessor, "run", fake_preprocessor_run)
+    monkeypatch.setattr(
+        analyze_module._action_legality_service,
+        "run",
+        fake_action_legality_run,
+    )
+
+    await initialize_job_status(job_id)
+    await analyze_module.process_job(
+        job_id=job_id,
+        selected_features=["action_legality"],
+        video_bytes=b"123",
+        filename="upload.mp4",
+        calibration=calibration,
+    )
+
+    job_status = await get_job_status(job_id)
+
+    assert recorded_require_ball_path == [False]
+    assert job_status.action_legality.status == "done"
+    assert job_status.action_legality.result is not None
+    assert job_status.action_legality.result["verdict"] == "legal"
+    assert job_status.bowler_performance.status == "pending"
