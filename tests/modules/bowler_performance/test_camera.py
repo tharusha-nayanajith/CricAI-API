@@ -2,7 +2,8 @@ import numpy as np
 import pytest
 
 from app.modules.bowler_performance.camera import (
-    _rodrigues,
+    _euler_to_rotation,
+    build_extrinsic_matrix,
     build_intrinsic_matrix,
     pixels_to_world_points,
     unproject_to_ground,
@@ -18,19 +19,19 @@ def _camera_rt(camera_position: tuple[float, float, float]) -> np.ndarray:
     return np.hstack([rotation, translation])
 
 
-def test_rodrigues_returns_identity_for_zero_vector() -> None:
-    rotation = _rodrigues(np.zeros(3, dtype=np.float64))
+def test_euler_to_rotation_returns_identity_for_zero_vector() -> None:
+    rotation = _euler_to_rotation(np.zeros(3, dtype=np.float64))
 
     assert np.allclose(rotation, np.eye(3, dtype=np.float64))
 
 
-def test_rodrigues_returns_expected_matrix_for_known_rotation() -> None:
-    rotation = _rodrigues(np.array([0.0, 0.0, np.pi / 2.0], dtype=np.float64))
+def test_euler_to_rotation_returns_expected_matrix_for_known_rotation() -> None:
+    rotation = _euler_to_rotation(np.array([0.0, 0.0, np.pi / 2.0], dtype=np.float64))
     expected = np.array(
         [
-            [0.0, -1.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [-0.0, 0.0, -1.0],
         ],
         dtype=np.float64,
     )
@@ -38,7 +39,7 @@ def test_rodrigues_returns_expected_matrix_for_known_rotation() -> None:
     assert np.allclose(rotation, expected, atol=1e-9)
 
 
-def test_build_intrinsic_matrix_uses_image_width_and_fov() -> None:
+def test_build_intrinsic_matrix_uses_image_height_and_fov() -> None:
     calibration = CalibrationDataFactory().model_copy(
         update={
             "image_size": (1920, 1080),
@@ -49,10 +50,27 @@ def test_build_intrinsic_matrix_uses_image_width_and_fov() -> None:
 
     intrinsic = build_intrinsic_matrix(calibration)
 
-    assert intrinsic[0, 0] == pytest.approx(960.0)
-    assert intrinsic[1, 1] == pytest.approx(960.0)
+    assert intrinsic[0, 0] == pytest.approx(540.0)
+    assert intrinsic[1, 1] == pytest.approx(540.0)
     assert intrinsic[0, 2] == pytest.approx(960.0)
     assert intrinsic[1, 2] == pytest.approx(540.0)
+
+
+def test_build_extrinsic_matrix_uses_euler_rotation_convention() -> None:
+    calibration = CalibrationDataFactory().model_copy(
+        update={
+            "rotation": (0.0, 0.0, np.pi / 2.0),
+            "position": (1.0, 2.0, 3.0),
+        }
+    )
+
+    extrinsic = build_extrinsic_matrix(calibration)
+
+    expected_rotation = _euler_to_rotation(np.array([0.0, 0.0, np.pi / 2.0], dtype=np.float64))
+    expected_translation = -expected_rotation @ np.array([1.0, 2.0, 3.0], dtype=np.float64)
+
+    assert np.allclose(extrinsic[:, :3], expected_rotation)
+    assert np.allclose(extrinsic[:, 3], expected_translation)
 
 
 def test_unproject_to_ground_returns_none_for_parallel_ray() -> None:

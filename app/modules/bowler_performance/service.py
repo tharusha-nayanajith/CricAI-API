@@ -81,8 +81,6 @@ class BowlerPerformanceAnalyzer:
                 None,
                 partial(build_pitch_frame, calibration, intrinsic, extrinsic),
             )
-            if pitch_frame is None:
-                raise FeatureError("Unable to derive pitch coordinates from calibration")
 
             pitch_points = await loop.run_in_executor(
                 None,

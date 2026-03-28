@@ -9,9 +9,9 @@ from app.modules.preprocessor.models import BallDetection
 
 
 def build_intrinsic_matrix(calibration: CalibrationData) -> np.ndarray:
-    image_width = float(calibration.image_size[0])
+    image_height = float(calibration.image_size[1])
     fov_radians = calibration.fov * pi / 180.0
-    focal_length_px = (image_width / 2.0) / tan(fov_radians / 2.0)
+    focal_length_px = image_height / (tan(fov_radians / 2.0) * 2.0)
     cx, cy = calibration.principal_point
     return np.array(
         [
@@ -24,33 +24,34 @@ def build_intrinsic_matrix(calibration: CalibrationData) -> np.ndarray:
 
 
 def build_extrinsic_matrix(calibration: CalibrationData) -> np.ndarray:
-    rotation_vector = np.array(calibration.rotation, dtype=np.float64)
-    rotation_matrix = _rodrigues(rotation_vector)
+    rotation_euler = np.array(calibration.rotation, dtype=np.float64)
+    rotation_matrix = _euler_to_rotation(rotation_euler)
     camera_position = np.array(calibration.position, dtype=np.float64)
     translation = -rotation_matrix @ camera_position
     return np.hstack([rotation_matrix, translation.reshape(3, 1)])
 
 
-def _rodrigues(rvec: np.ndarray) -> np.ndarray:
-    theta = float(np.linalg.norm(rvec))
-    if theta < 1e-9:
-        return np.eye(3, dtype=np.float64)
+def _euler_to_rotation(rotation_euler: np.ndarray) -> np.ndarray:
+    rx, ry, rz = rotation_euler[0], rotation_euler[1], rotation_euler[2]
+    cos_z = cos(rz)
+    sin_z = sin(rz)
+    cos_y = cos(ry)
+    sin_y = sin(ry)
+    cos_x = cos(rx)
+    sin_x = sin(rx)
 
-    k = rvec / theta
-    k_skew = np.array(
-        [
-            [0.0, -k[2], k[1]],
-            [k[2], 0.0, -k[0]],
-            [-k[1], k[0], 0.0],
-        ],
-        dtype=np.float64,
-    )
-    identity = np.eye(3, dtype=np.float64)
-    return (
-        identity * cos(theta)
-        + (1.0 - cos(theta)) * np.outer(k, k)
-        + k_skew * sin(theta)
-    )
+    row0 = [cos_z * cos_y, sin_z * cos_y, -sin_y]
+    row1 = [
+        (-cos_z) * sin_y * sin_x + sin_z * cos_x,
+        (-cos_z) * cos_x - (sin_z * sin_y) * sin_x,
+        (-cos_y) * sin_x,
+    ]
+    row2 = [
+        (-sin_z) * sin_x - (cos_z * sin_y) * cos_x,
+        (-sin_z) * sin_y * cos_x + cos_z * sin_x,
+        (-cos_y) * cos_x,
+    ]
+    return np.array([row0, row1, row2], dtype=np.float64)
 
 
 def unproject_to_ground(
