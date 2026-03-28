@@ -2,7 +2,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from app.modules.preprocessor.models import BallDetection, BatContactResult, ReleasePoint
+from app.modules.preprocessor.models import (
+    BallDetection,
+    BatContactResult,
+    BatterMode,
+    ReleasePoint,
+)
 
 
 @dataclass(slots=True)
@@ -11,4 +16,5 @@ class VideoArtifacts:
     ball_path: list[BallDetection]
     bat_contact_frame: np.ndarray | None
     release_point: ReleasePoint | None = None
+    batter_mode: BatterMode | None = None
     bat_contact: BatContactResult | None = None

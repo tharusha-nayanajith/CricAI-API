@@ -82,9 +82,19 @@ def build_result(
     pitch_points: list[PitchPoint],
     inliers: list[BallDetection],
     bounce_frame: int | None,
+    trajectory_reliable: bool = True,
+    trajectory_warning: str | None = None,
 ) -> BowlerPerformanceResult:
-    speed_ms, speed_kmh = compute_speed(world_points)
-    swing_metres = compute_swing(pitch_points, bounce_frame)
+    speed_ms: float | None
+    speed_kmh: float | None
+    swing_metres: float | None
+    if trajectory_reliable:
+        speed_ms, speed_kmh = compute_speed(world_points)
+        swing_metres = compute_swing(pitch_points, bounce_frame)
+    else:
+        speed_ms = None
+        speed_kmh = None
+        swing_metres = None
     bounce_point, length_class = compute_bounce_and_length(pitch_points, bounce_frame)
     confidence = float(
         np.mean([detection.confidence for detection in inliers], dtype=np.float64)
@@ -98,4 +108,6 @@ def build_result(
         confidence=confidence,
         inlier_count=len(inliers),
         raw_speed_ms=speed_ms,
+        trajectory_reliable=trajectory_reliable,
+        trajectory_warning=trajectory_warning,
     )

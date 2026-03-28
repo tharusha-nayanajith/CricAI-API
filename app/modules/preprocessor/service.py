@@ -136,6 +136,7 @@ class VideoPreprocessor:
                 ball_path=[],
                 bat_contact_frame=None,
                 release_point=ctx.release_point,
+                batter_mode=ctx.batter_mode,
                 bat_contact=None,
             )
 
@@ -179,6 +180,7 @@ class VideoPreprocessor:
                 ctx.bat_contact.annotated_frame if ctx.bat_contact is not None else None
             ),
             release_point=ctx.release_point,
+            batter_mode=ctx.batter_mode,
             bat_contact=ctx.bat_contact,
         )
 
