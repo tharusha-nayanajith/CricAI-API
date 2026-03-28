@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
+import signal
+import threading
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -25,6 +28,10 @@ SCALER_PATH = ASSETS_DIR / "scaler.json"
 _model: Any | None = None
 _metadata: ActionLegalityMetadata | None = None
 _scaler: ActionLegalityScaler | None = None
+_pose_landmarker: Any | None = None
+_pose_landmarker_lock = threading.Lock()
+_pose_landmarker_initialized = False
+_pose_landmarker_cleanup_registered = False
 
 
 class ActionLegalityService:
@@ -182,16 +189,140 @@ def _extract_keypoints_from_frame(
     except ImportError as exc:
         raise FeatureError("mediapipe is required for the action_legality module.") from exc
 
-    with mp.solutions.pose.Pose(static_image_mode=True, model_complexity=1) as pose:
-        results = pose.process(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
-    if not results.pose_landmarks:
+    pose_cls = _resolve_mediapipe_pose(mp)
+    if pose_cls is not None:
+        with pose_cls(static_image_mode=True, model_complexity=1) as pose:
+            results = pose.process(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
+        if not results.pose_landmarks:
+            return None
+
+        features: list[float] = []
+        for landmark_idx in selected_landmarks:
+            landmark = results.pose_landmarks.landmark[landmark_idx]
+            features.extend([landmark.x, landmark.y, landmark.z])
+        return np.asarray(features, dtype=np.float32)
+
+    return _extract_keypoints_with_tasks(mp, frame_bgr, selected_landmarks)
+
+
+def _resolve_mediapipe_pose(mp: Any):
+    if hasattr(mp, "solutions"):
+        pose = getattr(mp.solutions, "pose", None)
+        if pose is not None and hasattr(pose, "Pose"):
+            return pose.Pose
+    try:
+        from mediapipe.python.solutions import pose as mp_pose
+    except Exception:  # pragma: no cover - depends on local mediapipe build
+        return None
+    return mp_pose.Pose
+
+
+def _extract_keypoints_with_tasks(
+    mp: Any,
+    frame_bgr: np.ndarray,
+    selected_landmarks: list[int],
+) -> np.ndarray | None:
+    landmarker = _get_pose_landmarker()
+    image = mp.Image(
+        image_format=mp.ImageFormat.SRGB,
+        data=cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB),
+    )
+    result = landmarker.detect(image)
+    if not result.pose_landmarks:
         return None
 
+    pose_landmarks = result.pose_landmarks[0]
     features: list[float] = []
     for landmark_idx in selected_landmarks:
-        landmark = results.pose_landmarks.landmark[landmark_idx]
+        landmark = pose_landmarks[landmark_idx]
         features.extend([landmark.x, landmark.y, landmark.z])
     return np.asarray(features, dtype=np.float32)
+
+
+def _get_pose_landmarker():
+    global _pose_landmarker
+    global _pose_landmarker_initialized
+    if _pose_landmarker is not None:
+        return _pose_landmarker
+    if _pose_landmarker_initialized:
+        raise FeatureError("PoseLandmarker initialization failed earlier.")
+
+    model_path = os.getenv("MEDIAPIPE_POSE_TASK_PATH")
+    if not model_path:
+        model_path = str(ASSETS_DIR / "pose_landmarker.task")
+    model_file = Path(model_path)
+    if not model_file.exists():
+        raise FeatureError(
+            "mediapipe PoseLandmarker model is missing. "
+            "Set MEDIAPIPE_POSE_TASK_PATH or place the task file at "
+            f"{model_file}."
+        )
+
+    try:
+        from mediapipe.tasks.python import BaseOptions
+        from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions, RunningMode
+    except Exception as exc:  # pragma: no cover - depends on local mediapipe build
+        raise FeatureError(
+            "mediapipe Tasks API is unavailable. Install the full mediapipe package."
+        ) from exc
+
+    with _pose_landmarker_lock:
+        if _pose_landmarker is not None:
+            return _pose_landmarker
+        if _pose_landmarker_initialized:
+            raise FeatureError("PoseLandmarker initialization failed earlier.")
+
+        try:
+            options = PoseLandmarkerOptions(
+                base_options=BaseOptions(
+                    model_asset_path=str(model_file),
+                    delegate=BaseOptions.Delegate.GPU,
+                ),
+                running_mode=RunningMode.IMAGE,
+                num_poses=1,
+            )
+            _pose_landmarker = PoseLandmarker.create_from_options(options)
+        except Exception as exc:
+            logger.warning(
+                "PoseLandmarker GPU delegate failed ({}). Falling back to CPU.",
+                exc,
+            )
+            options = PoseLandmarkerOptions(
+                base_options=BaseOptions(
+                    model_asset_path=str(model_file),
+                    delegate=BaseOptions.Delegate.CPU,
+                ),
+                running_mode=RunningMode.IMAGE,
+                num_poses=1,
+            )
+            _pose_landmarker = PoseLandmarker.create_from_options(options)
+
+        _pose_landmarker_initialized = True
+        _register_landmarker_cleanup()
+        return _pose_landmarker
+
+
+def _register_landmarker_cleanup() -> None:
+    global _pose_landmarker_cleanup_registered
+    if _pose_landmarker_cleanup_registered:
+        return
+    if threading.current_thread() is not threading.main_thread():
+        return
+
+    def _cleanup_landmarker(*_args) -> None:
+        global _pose_landmarker
+        if _pose_landmarker is None:
+            return
+        try:
+            _pose_landmarker.close()
+        except Exception as exc:
+            logger.debug("PoseLandmarker close failed: {}", exc)
+        finally:
+            _pose_landmarker = None
+
+    signal.signal(signal.SIGTERM, _cleanup_landmarker)
+    signal.signal(signal.SIGINT, _cleanup_landmarker)
+    _pose_landmarker_cleanup_registered = True
 
 
 def _normalize_keypoints_by_torso(
