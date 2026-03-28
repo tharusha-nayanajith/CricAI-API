@@ -75,12 +75,24 @@ class TemporalFeatureEngineer:
         
         contact_idx, contact_metadata = self.ball_detector.detect_contact_frame(frames, pose_sequence)
         
-        pre_idx = max(0, contact_idx - 4)
-        follow_idx = min(len(pose_sequence) - 1, contact_idx + 3)
+        # Extract wider window for better temporal context
+        # Cricket swing involves preparation, contact, and follow-through phases
+        pre_frames = 8    # More frames before contact for stance analysis
+        post_frames = 6   # Frames after contact for follow-through
         
+        # If contact_window is provided, use it to increase robustness
+        contact_window_start = contact_metadata.get('contact_window_start', max(0, contact_idx - 2))
+        contact_window_end = contact_metadata.get('contact_window_end', min(len(pose_sequence) - 1, contact_idx + 2))
+
+        # Expand pre/follow frame window around the contact window
+        pre_idx = max(0, contact_window_start - pre_frames)
+        follow_idx = min(len(pose_sequence) - 1, contact_window_end + post_frames)
+
         detection_method = contact_metadata.get('detection_method', 'unknown')
         print(f"✓ Contact detected at frame {contact_idx} (method: {detection_method})")
-        
+        print(f"✓ Contact window: frames {contact_window_start} to {contact_window_end}")
+        print(f"✓ Shot window: frames {pre_idx} to {follow_idx} ({follow_idx - pre_idx + 1} frames)")
+
         return pre_idx, contact_idx, follow_idx, contact_metadata
 
     def detect_shot_window_fallback(self, pose_sequence: List[Dict]) -> Tuple[int, int, int]:
@@ -118,10 +130,17 @@ class TemporalFeatureEngineer:
         # Contact point = maximum movement
         contact_idx = np.argmax(movement_scores) + 1
         
-        # Pre-shot = 3-5 frames before contact
-        pre_idx = max(0, contact_idx - 4)
+        # Wider window for better temporal context
+        pre_frames = 8
+        post_frames = 6
         
-        # Follow-through = 2-4 frames after contact
+        pre_idx = max(0, contact_idx - pre_frames)
+        follow_idx = min(len(pose_sequence) - 1, contact_idx + post_frames)
+        
+        print(f"✓ Fallback contact detected at frame {contact_idx}")
+        print(f"✓ Shot window: frames {pre_idx} to {follow_idx} ({follow_idx - pre_idx + 1} frames)")
+        
+        return pre_idx, contact_idx, follow_idx
         follow_idx = min(len(pose_sequence) - 1, contact_idx + 3)
         
         return pre_idx, contact_idx, follow_idx

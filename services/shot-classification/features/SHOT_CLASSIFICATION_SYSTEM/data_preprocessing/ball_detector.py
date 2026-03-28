@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 from ultralytics import YOLO
 import os
+import onnxruntime as ort
 
 from features.SHOT_CLASSIFICATION_SYSTEM.data_preprocessing.kalman_ball_tracker import KalmanBallTracker
 from features.SHOT_CLASSIFICATION_SYSTEM.utils.config import MODEL_FOLDER_PATH
@@ -39,7 +40,7 @@ class BallBatDetector:
     """
 
     # ── Confidence thresholds ──────────────────────────────────────────────────
-    BALL_CONF_THRESH   = 0.45   # custom ball model
+    BALL_CONF_THRESH   = 0.25   # custom ball model (catch blurred detections, avoid noise)
     BAT_CONF_THRESH    = 0.2   # custom bat model  (higher = less false positives)
     GENERIC_BAT_THRESH = 0.30   # COCO bat classes
 
@@ -75,13 +76,38 @@ class BallBatDetector:
 
         # ── Custom BALL detector ──────────────────────────────────────────────
         self.yolo_ball_model = None
+        self.onnx_ball_session = None
+        self.ball_model_is_onnx = False
         if use_custom_ball_detector:
-            self.yolo_ball_model = self._load_model(
-                primary=Path(MODEL_FOLDER_PATH) / "yolov8_ball_detector" / "best_model.pt",
-                fallback=Path(MODEL_FOLDER_PATH) / "yolov8_ball_detector" / "train" / "weights" / "best.pt",
-                label="ball detector",
-                required=True,
-            )
+            # Try loading ONNX model directly FIRST (don't use YOLO wrapper for ONNX)
+            primary_onnx_path = Path(MODEL_FOLDER_PATH) / "yolov8_ball_detector" / "ballDetection.onnx"
+            fallback_pt_path = Path(MODEL_FOLDER_PATH) / "yolov8_ball_detector" / "train" / "weights" / "best.pt"
+            
+            print(f"🔍 Checking for ONNX model at: {primary_onnx_path}")
+            print(f"   ONNX exists: {primary_onnx_path.exists()}")
+            
+            if primary_onnx_path.exists():
+                try:
+                    print(f"🏏 Loading ball detector (ONNX): {primary_onnx_path.name}")
+                    self.onnx_ball_session = ort.InferenceSession(str(primary_onnx_path))
+                    self.ball_model_is_onnx = True
+                    print(f"✅ Ball detector (ONNX) loaded successfully")
+                except Exception as e:
+                    print(f"⚠️  ONNX loading failed: {e}. Trying PyTorch fallback...")
+                    self.ball_model_is_onnx = False
+            else:
+                print(f"⚠️  ONNX file not found at {primary_onnx_path}")
+            
+            # If ONNX failed or not available, load PyTorch model through YOLO
+            # Only load .pt files, never pass ONNX to YOLO wrapper
+            if not self.ball_model_is_onnx:
+                print(f"📍 Using PyTorch fallback for ball detector")
+                self.yolo_ball_model = self._load_model(
+                    primary=fallback_pt_path,  # Skip ONNX for YOLO wrapper
+                    fallback=fallback_pt_path,  # Both point to .pt
+                    label="ball detector",
+                    required=True,
+                )
 
         # ── Custom BAT detector ───────────────────────────────────────────────
         self.yolo_bat_model = None
@@ -129,10 +155,98 @@ class BallBatDetector:
     # ──────────────────────────────────────────────────────────────────────────
 
     def detect_ball_yolov8(self, frame: np.ndarray) -> Optional[Tuple[np.ndarray, float]]:
-        """Detect ball using custom trained YOLOv8 model."""
-        if self.yolo_ball_model is None:
+        """Detect ball using custom trained YOLOv8 model (ONNX or PyTorch)."""
+        # Check if we have ANY model (ONNX or YOLO)
+        if self.yolo_ball_model is None and not self.ball_model_is_onnx:
             return None
 
+        # ── Use ONNXRuntime directly for ONNX models ──────────────────────────
+        if self.ball_model_is_onnx and self.onnx_ball_session is not None:
+            try:
+                # Get expected input dimensions from ONNX model
+                input_info = self.onnx_ball_session.get_inputs()[0]
+                input_shape = input_info.shape  # [1, 3, H, W]
+                expected_h = int(input_shape[2]) if len(input_shape) > 2 else 640
+                expected_w = int(input_shape[3]) if len(input_shape) > 3 else 640
+                
+                # Resize frame to match ONNX model's expected dimensions
+                frame_h, frame_w = frame.shape[:2]
+                frame_resized = cv2.resize(frame, (expected_w, expected_h))
+                scale_x = frame_w / expected_w
+                scale_y = frame_h / expected_h
+                
+                # Prepare frame: BGR → RGB, normalize, transpose to NCHW
+                frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+                frame_norm = frame_rgb.astype(np.float32) / 255.0
+                frame_nchw = np.transpose(frame_norm, (2, 0, 1))[np.newaxis, ...]  # [1, 3, H, W]
+                
+                # Get input names from ONNX session
+                input_names = [inp.name for inp in self.onnx_ball_session.get_inputs()]
+                output_name = self.onnx_ball_session.get_outputs()[0].name
+                
+                # Create input dict with all required inputs (fill with same frame)
+                inputs = {}
+                for inp_name in input_names:
+                    inputs[inp_name] = frame_nchw
+                
+                # Run inference
+                outputs = self.onnx_ball_session.run([output_name], inputs)
+                pred = outputs[0]  # [1, 25200, 85] or similar
+                
+                # Parse predictions: extract ball detections (class 0)
+                if pred.size == 0:
+                    return None
+                
+                pred = pred[0]  # Remove batch dimension [25200, 85]
+                
+                # Filter by confidence and class
+                # Format: [x, y, w, h, obj_conf, class_0_conf, ...]
+                valid_dets = []
+                for det in pred:
+                    # Use .item() for safe numpy scalar conversion
+                    try:
+                        obj_conf = float(det[4].item() if hasattr(det[4], 'item') else det[4])
+                        class_conf = float(det[5].item() if hasattr(det[5], 'item') else det[5])
+                    except (ValueError, TypeError, AttributeError):
+                        continue  # Skip malformed detections
+                    
+                    if obj_conf > self.BALL_CONF_THRESH and class_conf > self.BALL_CONF_THRESH:
+                        try:
+                            x_center = float(det[0].item() if hasattr(det[0], 'item') else det[0])
+                            y_center = float(det[1].item() if hasattr(det[1], 'item') else det[1])
+                            w = float(det[2].item() if hasattr(det[2], 'item') else det[2])
+                            h = float(det[3].item() if hasattr(det[3], 'item') else det[3])
+                        except (ValueError, TypeError, AttributeError):
+                            continue  # Skip malformed detections
+                        
+                        # Convert YOLO format (center, width/height) to xyxy
+                        x1 = max(0, int(x_center - w / 2))
+                        y1 = max(0, int(y_center - h / 2))
+                        x2 = int(x_center + w / 2)
+                        y2 = int(y_center + h / 2)
+                        
+                        # Scale back to original frame dimensions
+                        x1 = int(x1 * scale_x)
+                        y1 = int(y1 * scale_y)
+                        x2 = int(x2 * scale_x)
+                        y2 = int(y2 * scale_y)
+                        
+                        valid_dets.append((np.array([x1, y1, x2, y2]), class_conf))
+                
+                if valid_dets:
+                    # Return highest confidence detection
+                    best = max(valid_dets, key=lambda x: x[1])
+                    return best[0], best[1]
+                return None
+                
+            except Exception as e:
+                print(f"⚠️  ONNX inference error: {e}. Falling back to YOLO wrapper.")
+                self.ball_model_is_onnx = False  # Disable ONNX for future calls
+        
+        # ── Fallback: Use YOLO wrapper (for .pt models) ──────────────────────
+        if self.yolo_ball_model is None:
+            return None
+                    
         results = self.yolo_ball_model.predict(
             frame,
             conf=self.BALL_CONF_THRESH,
@@ -192,7 +306,8 @@ class BallBatDetector:
         # ── Ball detection ────────────────────────────────────────────────────
         ball_bbox, ball_conf = None, 0.0
 
-        if self.yolo_ball_model is not None:
+        # Call ball detector if we have EITHER ONNX or PyTorch model
+        if self.yolo_ball_model is not None or self.ball_model_is_onnx:
             result = self.detect_ball_yolov8(frame)
             if result is not None:
                 ball_bbox, ball_conf = result
@@ -247,6 +362,62 @@ class BallBatDetector:
             "generic_bat_conf":  generic_bat_conf,
         }
 
+    def _calculate_bat_velocity(self, pose_sequence: List[Dict]) -> List[float]:
+        """
+        Calculate bat velocity using wrist/elbow keypoints.
+        Higher velocity indicates swing motion.
+        """
+        velocities = []
+        prev_wrist_pos = None
+
+        for pose in pose_sequence:
+            keypoints = pose["keypoints"]
+            scores = pose["scores"]
+
+            # Use right wrist for bat velocity (assuming right-handed batsman)
+            wrist_idx = 10  # COCO: 10=right_wrist
+            if scores[wrist_idx] > 0.5:
+                wrist_pos = keypoints[wrist_idx]
+                if prev_wrist_pos is not None:
+                    # Calculate velocity (pixels per frame)
+                    velocity = np.linalg.norm(wrist_pos - prev_wrist_pos)
+                    velocities.append(velocity)
+                else:
+                    velocities.append(0.0)
+                prev_wrist_pos = wrist_pos
+            else:
+                velocities.append(0.0)
+
+        return velocities
+
+    def _validate_contact_with_motion(self, contact_idx: int, pose_sequence: List[Dict],
+                                    velocities: List[float]) -> float:
+        """
+        Validate contact frame using motion cues.
+        Returns motion confidence score (0-1).
+        """
+        if contact_idx >= len(velocities):
+            return 0.0
+
+        # Contact should occur during high-velocity swing
+        contact_velocity = velocities[contact_idx]
+
+        # Check if velocity is above threshold (swing motion)
+        max_velocity = max(velocities) if velocities else 0
+        if max_velocity == 0:
+            return 0.0
+
+        velocity_ratio = contact_velocity / max_velocity
+
+        # Bonus if contact is near peak velocity
+        peak_idx = np.argmax(velocities)
+        frames_from_peak = abs(contact_idx - peak_idx)
+
+        # Motion score: high velocity + proximity to peak
+        motion_score = velocity_ratio * np.exp(-frames_from_peak / 3.0)
+
+        return float(motion_score)
+
     def get_virtual_bat_bbox(self, pose_data: Dict) -> Optional[np.ndarray]:
         """Create a virtual bat bounding box from wrist/elbow keypoints."""
         keypoints = pose_data["keypoints"]
@@ -294,13 +465,19 @@ class BallBatDetector:
         pose_sequence: List[Dict],
     ) -> Tuple[int, Dict]:
         """
-        4-Tier contact detection across all frames.
+        4-Tier contact detection with motion-based validation.
+
+        Priority order:
+        1. Custom ball + Custom bat (with motion validation)
+        2. Custom ball + Generic bat
+        3. Custom ball + Virtual bat
+        4. Motion-based fallback
 
         Returns:
             (contact_frame_index, metadata_dict)
         """
-        print("🎯 4-Tier Ball-Bat Contact Detection")
-        print("-" * 55)
+        print("🎯 4-Tier Ball-Bat Contact Detection with Motion Validation")
+        print("-" * 60)
 
         scores_t1, scores_t2, scores_t3 = [], [], []
         detections_log = []
@@ -354,6 +531,9 @@ class BallBatDetector:
         print(f"   Bat  (custom):       {custom_bat_rate:.1f}% ({custom_bat_detected_count}/{n})")
         print(f"   Bat  (generic COCO): {generic_bat_rate:.1f}% ({generic_bat_detected_count}/{n})")
 
+        # ── Calculate bat velocities for motion validation ──────────────────────
+        velocities = self._calculate_bat_velocity(pose_sequence)
+
         # ── Tier selection ────────────────────────────────────────────────────
         max_t1 = max(scores_t1)
         max_t2 = max(scores_t2)
@@ -362,33 +542,88 @@ class BallBatDetector:
         if max_t1 > self.TIER1_SCORE_THRESH and ball_rate > self.BALL_RATE_TIER1:
             peak = int(np.argmax(scores_t1))
 
-            # search ±2 frames for closest ball-bat distance
+            # Search around PEAK for TRUE CONTACT (proximity + motion + IoU)
+            # Contact should occur during high-velocity swing phase
             best_idx = peak
-            best_dist = float("inf")
+            best_score = 0.0
+            candidate_scores = []
 
-            for j in range(max(0, peak-2), min(len(frames), peak+3)):
+            # Expanded search window: ±10 frames around peak for better coverage
+            search_range = range(max(0, peak - 10), min(len(detections_log), peak + 20))
+
+            for j in search_range:
                 d = detections_log[j]
-                if d["ball_bbox"] is None or d["bat_bbox"] is None:
+                if d["bat_bbox"] is None or d["ball_bbox"] is None:
                     continue
 
                 dist = self._bbox_distance(d["ball_bbox"], d["bat_bbox"])
+                iou = self._calculate_iou(d["ball_bbox"], d["bat_bbox"])
+
+                # Motion validation score
+                motion_score = self._validate_contact_with_motion(j, pose_sequence, velocities)
+
+                # Combined score: proximity + motion + IoU
+                # Weight: 40% proximity, 30% motion, 30% IoU
+                proximity_score = np.exp(-dist / 50.0)  # Closer = higher score
+                combined_score = (0.4 * proximity_score) + (0.3 * motion_score) + (0.3 * iou)
+
+                candidate_scores.append((combined_score, j))
+
+                if combined_score > best_score:
+                    best_score = combined_score
+                    best_idx = j
+
+            # Keep top 3 candidate frames for robustness
+            candidate_scores.sort(reverse=True)
+            top_candidates = [idx for _, idx in candidate_scores[:3]]
+
+            contact_idx = best_idx
+            method      = "tier1_custom_ball_custom_bat_motion"
+            print(f"✅ Tier 1: Custom ball + Custom bat + Motion  (score: {max_t1:.3f})")
+            print(f"   → Contact at frame {contact_idx}  |  Combined score: {best_score:.3f}")
+            print(f"   → Candidate frames: {top_candidates}")
+
+        elif max_t2 > self.TIER2_SCORE_THRESH and ball_rate > self.BALL_RATE_TIER1:
+            # Search ALL frames for true contact (min distance)
+            # Note: Use frames with Kalman-predicted balls (low conf) since contact = maximum occlusion
+            best_idx = int(np.argmax(scores_t2))
+            best_dist = float("inf")
+
+            for j in range(len(detections_log)):
+                d = detections_log[j]
+                if d["generic_bat_bbox"] is None or d["ball_bbox"] is None:  # Allow predicted ball
+                    continue
+
+                dist = self._bbox_distance(d["ball_bbox"], d["generic_bat_bbox"])
                 if dist < best_dist:
                     best_dist = dist
                     best_idx = j
 
             contact_idx = best_idx
-            method      = "tier1_custom_ball_custom_bat"
-            print(f"✅ Tier 1: Custom ball + Custom bat  (score: {max_t1:.3f})")
-
-        elif max_t2 > self.TIER2_SCORE_THRESH and ball_rate > self.BALL_RATE_TIER1:
-            contact_idx = int(np.argmax(scores_t2))
             method      = "tier2_custom_ball_generic_bat"
             print(f"✅ Tier 2: Custom ball + Generic bat  (score: {max_t2:.3f})")
+            print(f"   → Contact at frame {contact_idx}  |  Distance: {best_dist:.1f}px")
 
         elif max_t3 > self.TIER3_SCORE_THRESH and ball_rate > self.BALL_RATE_TIER3:
-            contact_idx = int(np.argmax(scores_t3))
+            # Search ALL frames for true contact (min distance from virtual bat)
+            # Note: Use frames with Kalman-predicted balls (low conf) since contact = maximum occlusion
+            best_idx = int(np.argmax(scores_t3))
+            best_dist = float("inf")
+
+            for j in range(len(detections_log)):
+                d = detections_log[j]
+                if d["virtual_bat_bbox"] is None or d["ball_bbox"] is None:  # Allow predicted ball
+                    continue
+
+                dist = self._bbox_distance(d["ball_bbox"], d["virtual_bat_bbox"])
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = j
+
+            contact_idx = best_idx
             method      = "tier3_custom_ball_virtual_bat"
             print(f"⚠️  Tier 3: Custom ball + Virtual bat  (score: {max_t3:.3f})")
+            print(f"   → Contact at frame {contact_idx}  |  Distance: {best_dist:.1f}px")
 
         else:
             contact_idx = self._fallback_detection(pose_sequence)
@@ -397,8 +632,16 @@ class BallBatDetector:
                   f"  (ball rate: {ball_rate:.1f}%)")
 
         d = detections_log[contact_idx]
+        contact_window_radius = 2
+        contact_window_start = max(0, contact_idx - contact_window_radius)
+        contact_window_end = min(n - 1, contact_idx + contact_window_radius)
+        contact_window = list(range(contact_window_start, contact_window_end + 1))
+
         contact_metadata = {
             "contact_frame":      contact_idx,
+            "contact_window_start": contact_window_start,
+            "contact_window_end": contact_window_end,
+            "contact_window": contact_window,
             "detection_method":   method,
             "ball_detected":      d["ball_bbox"]        is not None,
             "bat_detected":       d["bat_bbox"]         is not None,
@@ -412,27 +655,6 @@ class BallBatDetector:
             "tier2_score": round(float(scores_t2[contact_idx]), 4),
             "tier3_score": round(float(scores_t3[contact_idx]), 4),
         }
-
-        # ── Save contact frame for debugging ─────────────────────────────
-        # debug_folder = "debug_contact_frames"
-        # os.makedirs(debug_folder, exist_ok=True)
-        # save_path = os.path.join(debug_folder, f"contact_frame_{contact_idx}.jpg")
-        # frame_debug = frames[contact_idx].copy()
-
-        # if d["ball_bbox"] is not None:
-        #     x1,y1,x2,y2 = map(int, d["ball_bbox"])
-        #     cv2.rectangle(frame_debug,(x1,y1),(x2,y2),(0,255,0),2)
-
-        # if d["bat_bbox"] is not None:
-        #     x1,y1,x2,y2 = map(int, d["bat_bbox"])
-        #     cv2.rectangle(frame_debug,(x1,y1),(x2,y2),(255,0,0),2)
-
-        # cv2.putText(frame_debug,"CONTACT FRAME",(40,40),
-        #             cv2.FONT_HERSHEY_SIMPLEX,1,(0,0,255),2)
-
-        # cv2.imwrite(save_path, frame_debug)
-
-        # print(f"📸 Contact frame saved → {save_path}")
 
         print(f"✓ Contact frame: {contact_idx}/{n}  method: {method}")
         print("-" * 55)

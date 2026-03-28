@@ -16,7 +16,6 @@ from features.SHOT_CLASSIFICATION_SYSTEM.data_preprocessing.frame_extractor impo
 from features.SHOT_CLASSIFICATION_SYSTEM.data_preprocessing.pose_estimator import PoseEstimator
 from features.SHOT_CLASSIFICATION_SYSTEM.data_preprocessing.temporal_feature_engineer import TemporalFeatureEngineer
 from features.SHOT_CLASSIFICATION_SYSTEM.utils.model_based_mistake_analyzer import ModelBasedMistakeAnalyzer
-from features.SHOT_CLASSIFICATION_SYSTEM.data_preprocessing.skeleton_animator import SkeletonAnimator
 from features.SHOT_CLASSIFICATION_SYSTEM.utils.config import (
     MODEL_FOLDER_PATH
 )
@@ -67,8 +66,6 @@ class BattingService:
             feature_importance_path=f"{model_dir}/prototypes/feature_importance.pkl",
             feature_names=self.feature_names
         )
-        
-        self.skeleton_animator = SkeletonAnimator()
         
         # AI feedback
         api_key = os.getenv('GEMINI_API_KEY')

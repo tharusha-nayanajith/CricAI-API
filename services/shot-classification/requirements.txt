@@ -35,3 +35,6 @@ google-genai
 python-dotenv
 roboflow
 python-dotenv
+
+onnx==1.15.0
+onnxruntime==1.17.0

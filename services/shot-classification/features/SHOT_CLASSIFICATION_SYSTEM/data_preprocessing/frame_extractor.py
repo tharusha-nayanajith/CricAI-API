@@ -42,8 +42,8 @@ class FrameExtractor:
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
-        # Calculate frame interval
-        frame_interval = 2
+        # Calculate frame interval - extract ALL frames for precise contact detection
+        frame_interval = 1  # Extract every frame to capture contact moment
         
         frames = []
         frame_count = 0
