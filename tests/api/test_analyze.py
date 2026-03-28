@@ -6,6 +6,7 @@ import pytest
 import app.api.analyze as analyze_module
 from app.modules.action_legality.models import ActionLegalityResult
 from app.modules.preprocessor.models import ReleasePoint
+from app.modules.shot_similarity.models import ShotSimilarityResult
 from app.storage.results import get_job_status, initialize_job_status
 from tests.conftest import CalibrationDataFactory
 
@@ -105,3 +106,68 @@ async def test_process_job_runs_action_legality_without_ball_tracking(
     assert job_status.action_legality.result is not None
     assert job_status.action_legality.result["verdict"] == "legal"
     assert job_status.bowler_performance.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_process_job_runs_shot_similarity_with_preprocessed_contact_frame(
+    fake_redis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ = fake_redis
+    calibration = CalibrationDataFactory()
+    job_id = "shot-similarity-job"
+    recorded_require_ball_path: list[bool] = []
+
+    async def fake_preprocessor_run(video_path, calibration_data, require_ball_path=True):
+        _ = video_path, calibration_data
+        recorded_require_ball_path.append(require_ball_path)
+        annotated = np.zeros((4, 4, 3), dtype=np.uint8)
+        return analyze_module.VideoArtifacts(
+            release_frame=annotated,
+            ball_path=[],
+            bat_contact_frame=np.ones((4, 4, 3), dtype=np.uint8),
+            release_point=ReleasePoint(
+                frame_idx=7,
+                timestamp_s=0.23,
+                hand_position=(10.0, 20.0),
+                confidence=0.91,
+                annotated_frame=annotated,
+                raw_frame=annotated,
+            ),
+        )
+
+    async def fake_shot_similarity_run(artifacts, video_url=None):
+        _ = artifacts, video_url
+        return ShotSimilarityResult(
+            similarity_percentage=92.5,
+            matched_player="Virat Kohli",
+            shot_type="cover_drive",
+            keypoints_detected=33,
+            confidence=91.0,
+            feedback=["Open up your left shoulder."],
+            compared_frame="bat_contact_frame",
+            video_url="upload.mp4",
+        )
+
+    monkeypatch.setattr(analyze_module._preprocessor, "run", fake_preprocessor_run)
+    monkeypatch.setattr(
+        analyze_module._shot_similarity_service,
+        "run",
+        fake_shot_similarity_run,
+    )
+
+    await initialize_job_status(job_id)
+    await analyze_module.process_job(
+        job_id=job_id,
+        selected_features=["shot_similarity"],
+        video_bytes=b"123",
+        filename="upload.mp4",
+        calibration=calibration,
+    )
+
+    job_status = await get_job_status(job_id)
+
+    assert recorded_require_ball_path == [True]
+    assert job_status.shot_similarity.status == "done"
+    assert job_status.shot_similarity.result is not None
+    assert job_status.shot_similarity.result["matched_player"] == "Virat Kohli"

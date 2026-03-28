@@ -19,6 +19,7 @@ from app.modules.action_legality.service import ActionLegalityService
 from app.modules.bowler_performance.service import BowlerPerformanceAnalyzer
 from app.modules.preprocessor.models import BallDetection
 from app.modules.preprocessor.service import VideoPreprocessor
+from app.modules.shot_similarity.service import ShotSimilarityService
 from app.storage.calibration import store_calibration
 from app.storage.results import initialize_job_status, set_feature_status, store_result
 
@@ -36,6 +37,7 @@ ALL_FEATURES = {
 _preprocessor = VideoPreprocessor()
 _bowler_analyzer = BowlerPerformanceAnalyzer()
 _action_legality_service = ActionLegalityService()
+_shot_similarity_service = ShotSimilarityService()
 
 
 def _write_video_bytes(video_path: Path, video_bytes: bytes) -> None:
@@ -60,14 +62,15 @@ async def run_bowler_performance(
     artifacts: VideoArtifacts,
     calibration: CalibrationData,
     fps: float,
+    video_url: str,
 ) -> None:
     await set_feature_status(job_id, "bowler_performance", "processing")
     try:
-        result = await _bowler_analyzer.run(artifacts, calibration, fps)
+        result = await _bowler_analyzer.run(artifacts, calibration, fps, video_url=video_url)
         await store_result(
             job_id,
             "bowler_performance",
-            FeatureResult(status="done", result=result.model_dump()),
+            FeatureResult(status="done", result=result.model_dump(by_alias=True)),
         )
     except FeatureError as exc:
         logger.error("bowler_performance failed for {}: {}", job_id, exc)
@@ -114,6 +117,35 @@ async def run_action_legality(
         )
 
 
+async def run_shot_similarity(
+    job_id: str,
+    artifacts: VideoArtifacts,
+    video_url: str,
+) -> None:
+    await set_feature_status(job_id, "shot_similarity", "processing")
+    try:
+        result = await _shot_similarity_service.run(artifacts, video_url=video_url)
+        await store_result(
+            job_id,
+            "shot_similarity",
+            FeatureResult(status="done", result=result.model_dump()),
+        )
+    except FeatureError as exc:
+        logger.error("shot_similarity failed for {}: {}", job_id, exc)
+        await store_result(
+            job_id,
+            "shot_similarity",
+            FeatureResult(status="failed", error=str(exc)),
+        )
+    except Exception as exc:
+        logger.exception("Unexpected shot_similarity failure for {}", job_id)
+        await store_result(
+            job_id,
+            "shot_similarity",
+            FeatureResult(status="failed", error=str(exc)),
+        )
+
+
 async def process_job(
     job_id: str,
     selected_features: list[str],
@@ -125,7 +157,7 @@ async def process_job(
     implemented_features = [
         feature_name
         for feature_name in selected_features
-        if feature_name in {"bowler_performance", "action_legality"}
+        if feature_name in {"bowler_performance", "action_legality", "shot_similarity"}
     ]
     if not implemented_features:
         logger.info("No implemented background features selected for {}", job_id)
@@ -141,7 +173,9 @@ async def process_job(
         artifacts = await _preprocessor.run(
             video_path,
             calibration,
-            require_ball_path="bowler_performance" in implemented_features,
+            require_ball_path=bool(
+                {"bowler_performance", "shot_similarity"} & set(implemented_features)
+            ),
         )
     except Exception as exc:
         logger.error("Preprocessor failed for {}: {}", job_id, exc)
@@ -154,9 +188,11 @@ async def process_job(
     else:
         if "bowler_performance" in implemented_features:
             fps = _derive_fps(artifacts.ball_path)
-            await run_bowler_performance(job_id, artifacts, calibration, fps)
+            await run_bowler_performance(job_id, artifacts, calibration, fps, safe_name)
         if "action_legality" in implemented_features:
             await run_action_legality(job_id, artifacts, safe_name)
+        if "shot_similarity" in implemented_features:
+            await run_shot_similarity(job_id, artifacts, safe_name)
     finally:
         await loop.run_in_executor(None, partial(_cleanup_job_dir, job_dir))
 
