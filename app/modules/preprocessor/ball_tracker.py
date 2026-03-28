@@ -1,8 +1,8 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
-import onnxruntime as ort
 from loguru import logger
 
 from app.exceptions import PreprocessingError
@@ -11,15 +11,24 @@ from app.modules.preprocessor.constants import (
     BALL_EARLY_STOP_CONF,
     BALL_EARLY_STOP_MIN_FRAME,
     BALL_EARLY_STOP_Y,
+    BALL_MAX_CANDIDATES_PER_FRAME,
+    BALL_PEAK_NMS_RADIUS,
     MAX_BALL_TRACK_FRAMES,
     STANDARDIZED_HEIGHT,
     STANDARDIZED_WIDTH,
 )
 from app.modules.preprocessor.models import BallDetection, BatterMode, BatterROI
 
+try:
+    import onnxruntime as ort
+except ImportError:
+    ort = SimpleNamespace(InferenceSession=None, SessionOptions=lambda: SimpleNamespace())
+
 
 class BallTracker:
     def __init__(self, model_path: Path):
+        if ort.InferenceSession is None:
+            raise PreprocessingError("onnxruntime is required for ball tracking.")
         sess_options = ort.SessionOptions()
         sess_options.intra_op_num_threads = 4
         self.session = ort.InferenceSession(
@@ -48,13 +57,13 @@ class BallTracker:
         img = np.transpose(img, (2, 0, 1))
         return np.expand_dims(img, axis=0)
 
-    def _infer(self, frame_bgr: np.ndarray) -> tuple[float | None, float | None, float]:
+    def _infer_candidates(self, frame_bgr: np.ndarray) -> list[tuple[float, float, float]]:
         processed = self._preprocess(frame_bgr)
         self._frame_buffer.append(processed)
         if len(self._frame_buffer) > 3:
             self._frame_buffer.pop(0)
         if len(self._frame_buffer) < 3:
-            return None, None, 0.0
+            return []
 
         outputs = self.session.run(
             [self.output_name],
@@ -65,10 +74,13 @@ class BallTracker:
             },
         )
         scores = outputs[0][0][0]
-        _, max_val, _, max_loc = cv2.minMaxLoc(scores)
-        peak_x = max_loc[0] * (STANDARDIZED_WIDTH / scores.shape[1])
-        peak_y = max_loc[1] * (STANDARDIZED_HEIGHT / scores.shape[0])
-        return peak_x, peak_y, float(max_val)
+        return self._extract_candidates(scores)
+
+    def _infer(self, frame_bgr: np.ndarray) -> tuple[float | None, float | None, float]:
+        candidates = self._infer_candidates(frame_bgr)
+        if not candidates:
+            return None, None, 0.0
+        return candidates[0]
 
     def track(
         self,
@@ -107,25 +119,38 @@ class BallTracker:
                 if not ret:
                     break
 
-                x, y, conf = self._infer(frame)
-                if x is None or y is None:
+                candidates = self._infer_candidates(frame)
+                frame_detections: list[BallDetection] = []
+                best_x: float | None = None
+                best_y: float | None = None
+                best_conf = 0.0
+
+                for x, y, conf in candidates:
+                    if best_x is None:
+                        best_x = x
+                        best_y = y
+                        best_conf = conf
+
+                    if conf < BALL_CONF_RAW_THRESHOLD:
+                        continue
+
+                    detection = BallDetection(
+                        frame_idx=current_frame_idx,
+                        timestamp_s=current_frame_idx / fps if fps > 0 else 0.0,
+                        x=x,
+                        y=y,
+                        confidence=conf,
+                    )
+                    detections.append(detection)
+                    frame_detections.append(detection)
+
+                if best_x is None or best_y is None:
                     continue
 
-                if conf >= BALL_CONF_RAW_THRESHOLD:
-                    detections.append(
-                        BallDetection(
-                            frame_idx=current_frame_idx,
-                            timestamp_s=current_frame_idx / fps if fps > 0 else 0.0,
-                            x=x,
-                            y=y,
-                            confidence=conf,
-                        )
-                    )
-
                 if batter_mode is BatterMode.PRESENT and batter_roi is not None:
-                    if (
-                        self._last_roi_entry_frame_idx is None
-                        and self._ball_in_roi(x, y, batter_roi)
+                    if self._last_roi_entry_frame_idx is None and any(
+                        self._ball_in_roi(detection.x, detection.y, batter_roi)
+                        for detection in frame_detections
                     ):
                         self._last_roi_entry_frame_idx = current_frame_idx
                         logger.info(
@@ -136,8 +161,8 @@ class BallTracker:
                     tracked = current_frame_idx - release_frame_idx
                     if (
                         tracked > BALL_EARLY_STOP_MIN_FRAME
-                        and conf < BALL_EARLY_STOP_CONF
-                        and y < BALL_EARLY_STOP_Y
+                        and best_conf < BALL_EARLY_STOP_CONF
+                        and best_y < BALL_EARLY_STOP_Y
                     ):
                         termination_reason = "early_stop_low_confidence"
                         break
@@ -151,6 +176,31 @@ class BallTracker:
             self._last_roi_entry_frame_idx,
         )
         return detections
+
+    def _extract_candidates(self, scores: np.ndarray) -> list[tuple[float, float, float]]:
+        working_scores = np.array(scores, copy=True)
+        candidates: list[tuple[float, float, float]] = []
+        scale_x = STANDARDIZED_WIDTH / scores.shape[1]
+        scale_y = STANDARDIZED_HEIGHT / scores.shape[0]
+        radius_x = max(1, int(round(BALL_PEAK_NMS_RADIUS / scale_x)))
+        radius_y = max(1, int(round(BALL_PEAK_NMS_RADIUS / scale_y)))
+
+        for _ in range(BALL_MAX_CANDIDATES_PER_FRAME):
+            _, max_val, _, max_loc = cv2.minMaxLoc(working_scores)
+            if max_val <= 0.0:
+                break
+
+            peak_x = max_loc[0] * scale_x
+            peak_y = max_loc[1] * scale_y
+            candidates.append((peak_x, peak_y, float(max_val)))
+
+            x_min = max(0, max_loc[0] - radius_x)
+            x_max = min(working_scores.shape[1], max_loc[0] + radius_x + 1)
+            y_min = max(0, max_loc[1] - radius_y)
+            y_max = min(working_scores.shape[0], max_loc[1] + radius_y + 1)
+            working_scores[y_min:y_max, x_min:x_max] = 0.0
+
+        return candidates
 
     def _ball_in_roi(
         self,

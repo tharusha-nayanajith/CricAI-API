@@ -110,6 +110,21 @@ def test_infer_returns_peak_coordinates_when_buffer_is_full(
     assert confidence == pytest.approx(0.85)
 
 
+def test_extract_candidates_returns_multiple_sorted_peaks(monkeypatch: pytest.MonkeyPatch) -> None:
+    tracker = _make_tracker(monkeypatch)
+    scores = np.zeros((640, 360), dtype=np.float32)
+    scores[320, 180] = 0.90
+    scores[100, 80] = 0.75
+    scores[500, 250] = 0.60
+
+    candidates = tracker._extract_candidates(scores)
+
+    assert len(candidates) >= 3
+    assert candidates[0][2] == pytest.approx(0.90)
+    assert candidates[1][2] == pytest.approx(0.75)
+    assert candidates[2][2] == pytest.approx(0.60)
+
+
 def test_reset_clears_frame_buffer(monkeypatch: pytest.MonkeyPatch) -> None:
     tracker = _make_tracker(monkeypatch)
     frame = np.zeros((STANDARDIZED_HEIGHT, STANDARDIZED_WIDTH, 3), dtype=np.uint8)
@@ -145,7 +160,7 @@ def test_track_stops_early_in_bowler_only_mode(monkeypatch: pytest.MonkeyPatch) 
         "app.modules.preprocessor.ball_tracker.cv2.VideoCapture",
         lambda _: _FakeCapture(),
     )
-    monkeypatch.setattr(tracker, "_infer", lambda frame: next(iterator))
+    monkeypatch.setattr(tracker, "_infer_candidates", lambda frame: [next(iterator)])
 
     detections = tracker.track(
         Path("video.mp4"),
@@ -176,7 +191,7 @@ def test_track_marks_roi_entry_but_keeps_tracking_in_batter_mode(
         "app.modules.preprocessor.ball_tracker.cv2.VideoCapture",
         lambda _: _FakeCapture(total_frames=13),
     )
-    monkeypatch.setattr(tracker, "_infer", lambda frame: next(iterator))
+    monkeypatch.setattr(tracker, "_infer_candidates", lambda frame: [next(iterator)])
 
     detections = tracker.track(
         Path("video.mp4"),
@@ -205,7 +220,7 @@ def test_track_returns_empty_list_when_confidence_never_exceeds_threshold(
         "app.modules.preprocessor.ball_tracker.cv2.VideoCapture",
         lambda _: _FakeCapture(total_frames=7),
     )
-    monkeypatch.setattr(tracker, "_infer", lambda frame: next(iterator))
+    monkeypatch.setattr(tracker, "_infer_candidates", lambda frame: [next(iterator)])
 
     detections = tracker.track(
         Path("video.mp4"),
@@ -216,6 +231,42 @@ def test_track_returns_empty_list_when_confidence_never_exceeds_threshold(
     )
 
     assert detections == []
+
+
+def test_track_keeps_multiple_candidates_per_frame_above_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = _make_tracker(monkeypatch)
+    sequence = [
+        [],
+        [],
+        [
+            (120.0, 300.0, 0.90),
+            (180.0, 360.0, 0.72),
+            (240.0, 420.0, BALL_CONF_RAW_THRESHOLD - 0.01),
+        ],
+    ]
+    iterator = iter(sequence)
+
+    monkeypatch.setattr(
+        "app.modules.preprocessor.ball_tracker.cv2.VideoCapture",
+        lambda _: _FakeCapture(total_frames=3),
+    )
+    monkeypatch.setattr(tracker, "_infer_candidates", lambda frame: next(iterator))
+
+    detections = tracker.track(
+        Path("video.mp4"),
+        release_frame_idx=2,
+        fps=30.0,
+        batter_mode=BatterMode.NONE,
+        batter_roi=None,
+    )
+
+    assert len(detections) == 2
+    assert [(detection.x, detection.y) for detection in detections] == [
+        (120.0, 300.0),
+        (180.0, 360.0),
+    ]
 
 
 @pytest.mark.asyncio
