@@ -17,4 +17,5 @@ class VideoArtifacts:
     bat_contact_frame: np.ndarray | None
     release_point: ReleasePoint | None = None
     batter_mode: BatterMode | None = None
+    batter_roi_entry_frame_idx: int | None = None
     bat_contact: BatContactResult | None = None

@@ -1,19 +1,51 @@
 import json
+from datetime import UTC, datetime
+from uuid import uuid4
 
 import numpy as np
 import pytest
 
 import app.api.analyze as analyze_module
+from app.api.deps import require_entitlement
+from app.main import app
 from app.modules.action_legality.models import ActionLegalityResult
 from app.modules.preprocessor.models import ReleasePoint
+from app.modules.shot_classifier.models import ShotClassifierResult
 from app.modules.shot_similarity.models import ShotSimilarityResult
+from app.modules.users.models import UserProfile
 from app.storage.results import get_job_status, initialize_job_status
 from tests.conftest import CalibrationDataFactory
 
 
 @pytest.mark.asyncio
-async def test_analyze_with_valid_payload_returns_job_id(test_client) -> None:
+async def test_analyze_with_valid_payload_returns_job_id(
+    test_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calibration = CalibrationDataFactory()
+    current_user = UserProfile(
+        id=uuid4(),
+        email="authorized@example.com",
+        full_name="Authorized User",
+        created_at=datetime.now(UTC),
+        is_active=True,
+        revenuecat_customer_id=None,
+        entitlement_status="active",
+        entitlement_expires_at=None,
+        current_tier="coach",
+        clips_used_this_month=0,
+        quota_reset_at=datetime.now(UTC),
+    )
+
+    async def fake_require_entitlement() -> UserProfile:
+        return current_user
+
+    async def fake_enforce_clip_quota(session, user_id):
+        _ = session, user_id
+        return current_user
+
+    app.dependency_overrides[require_entitlement] = fake_require_entitlement
+    monkeypatch.setattr(analyze_module._user_service, "enforce_clip_quota", fake_enforce_clip_quota)
     response = await test_client.post(
         "/analyze",
         files={"video": ("sample.mp4", b"00", "video/mp4")},
@@ -28,7 +60,33 @@ async def test_analyze_with_valid_payload_returns_job_id(test_client) -> None:
 
 
 @pytest.mark.asyncio
-async def test_analyze_with_malformed_calibration_returns_422(test_client) -> None:
+async def test_analyze_with_malformed_calibration_returns_422(
+    test_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_user = UserProfile(
+        id=uuid4(),
+        email="authorized@example.com",
+        full_name="Authorized User",
+        created_at=datetime.now(UTC),
+        is_active=True,
+        revenuecat_customer_id=None,
+        entitlement_status="active",
+        entitlement_expires_at=None,
+        current_tier="coach",
+        clips_used_this_month=0,
+        quota_reset_at=datetime.now(UTC),
+    )
+
+    async def fake_require_entitlement() -> UserProfile:
+        return current_user
+
+    async def fake_enforce_clip_quota(session, user_id):
+        _ = session, user_id
+        return current_user
+
+    app.dependency_overrides[require_entitlement] = fake_require_entitlement
+    monkeypatch.setattr(analyze_module._user_service, "enforce_clip_quota", fake_enforce_clip_quota)
     response = await test_client.post(
         "/analyze",
         files={"video": ("sample.mp4", b"00", "video/mp4")},
@@ -171,3 +229,70 @@ async def test_process_job_runs_shot_similarity_with_preprocessed_contact_frame(
     assert job_status.shot_similarity.status == "done"
     assert job_status.shot_similarity.result is not None
     assert job_status.shot_similarity.result["matched_player"] == "Virat Kohli"
+
+
+@pytest.mark.asyncio
+async def test_process_job_runs_shot_classifier_with_roi_entry_frame(
+    fake_redis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ = fake_redis
+    calibration = CalibrationDataFactory()
+    job_id = "shot-classifier-job"
+    recorded_require_ball_path: list[bool] = []
+
+    async def fake_preprocessor_run(video_path, calibration_data, require_ball_path=True):
+        _ = video_path, calibration_data
+        recorded_require_ball_path.append(require_ball_path)
+        annotated = np.zeros((4, 4, 3), dtype=np.uint8)
+        return analyze_module.VideoArtifacts(
+            release_frame=annotated,
+            ball_path=[],
+            bat_contact_frame=None,
+            release_point=ReleasePoint(
+                frame_idx=7,
+                timestamp_s=0.23,
+                hand_position=(10.0, 20.0),
+                confidence=0.91,
+                annotated_frame=annotated,
+                raw_frame=annotated,
+            ),
+            batter_roi_entry_frame_idx=18,
+        )
+
+    async def fake_shot_classifier_run(artifacts, video_path, video_url=None):
+        _ = artifacts, video_path, video_url
+        return ShotClassifierResult(
+            predicted_shot="cover",
+            confidence=0.93,
+            probabilities={"cover": 0.93},
+            frames_used=30,
+            frame_start_index=18,
+            frame_end_index=47,
+            roi_entry_frame_index=18,
+            trigger_source="batter_roi_entry",
+            video_url="upload.mp4",
+        )
+
+    monkeypatch.setattr(analyze_module._preprocessor, "run", fake_preprocessor_run)
+    monkeypatch.setattr(
+        analyze_module._shot_classifier_service,
+        "run",
+        fake_shot_classifier_run,
+    )
+
+    await initialize_job_status(job_id)
+    await analyze_module.process_job(
+        job_id=job_id,
+        selected_features=["shot_classifier"],
+        video_bytes=b"123",
+        filename="upload.mp4",
+        calibration=calibration,
+    )
+
+    job_status = await get_job_status(job_id)
+
+    assert recorded_require_ball_path == [True]
+    assert job_status.shot_classifier.status == "done"
+    assert job_status.shot_classifier.result is not None
+    assert job_status.shot_classifier.result["predicted_shot"] == "cover"

@@ -41,6 +41,10 @@ class BallTracker:
         self._last_roi_entry_frame_idx: int | None = None
         logger.info("Ball tracker provider: {}", self.session.get_providers()[0])
 
+    @property
+    def last_roi_entry_frame_idx(self) -> int | None:
+        return self._last_roi_entry_frame_idx
+
     def reset(self) -> None:
         self._frame_buffer = []
         self._last_roi_entry_frame_idx = None

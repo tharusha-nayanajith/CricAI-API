@@ -152,6 +152,7 @@ class VideoPreprocessor:
                 ctx.batter_roi,
             ),
         )
+        ctx.batter_roi_entry_frame_idx = getattr(ball_tracker, "last_roi_entry_frame_idx", None)
         if len(raw_path) < 3:
             raise PreprocessingError(f"Ball path too short: {len(raw_path)} detections")
         if ctx.batter_mode == BatterMode.PRESENT:
@@ -181,6 +182,7 @@ class VideoPreprocessor:
             ),
             release_point=ctx.release_point,
             batter_mode=ctx.batter_mode,
+            batter_roi_entry_frame_idx=ctx.batter_roi_entry_frame_idx,
             bat_contact=ctx.bat_contact,
         )
 

@@ -5,13 +5,16 @@ import tempfile
 from functools import partial
 from json import JSONDecodeError
 from pathlib import Path
+from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from loguru import logger
 from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.exceptions import FeatureError
+from app.api.deps import require_entitlement
+from app.exceptions import AuthenticationError, AuthorizationError, FeatureError
 from app.models.artifacts import VideoArtifacts
 from app.models.calibration import CalibrationData
 from app.models.job import FeatureResult
@@ -19,8 +22,12 @@ from app.modules.action_legality.service import ActionLegalityService
 from app.modules.bowler_performance.service import BowlerPerformanceAnalyzer
 from app.modules.preprocessor.models import BallDetection
 from app.modules.preprocessor.service import VideoPreprocessor
+from app.modules.shot_classifier.service import ShotClassifierService
 from app.modules.shot_similarity.service import ShotSimilarityService
+from app.modules.users.models import UserProfile
+from app.modules.users.service import UserService
 from app.storage.calibration import store_calibration
+from app.storage.database import get_db_session
 from app.storage.results import initialize_job_status, set_feature_status, store_result
 
 router = APIRouter(tags=["analyze"])
@@ -37,7 +44,9 @@ ALL_FEATURES = {
 _preprocessor = VideoPreprocessor()
 _bowler_analyzer = BowlerPerformanceAnalyzer()
 _action_legality_service = ActionLegalityService()
+_shot_classifier_service = ShotClassifierService()
 _shot_similarity_service = ShotSimilarityService()
+_user_service = UserService()
 
 
 def _write_video_bytes(video_path: Path, video_bytes: bytes) -> None:
@@ -137,11 +146,38 @@ async def run_shot_similarity(
             "shot_similarity",
             FeatureResult(status="failed", error=str(exc)),
         )
-    except Exception as exc:
-        logger.exception("Unexpected shot_similarity failure for {}", job_id)
+
+
+async def run_shot_classifier(
+    job_id: str,
+    artifacts: VideoArtifacts,
+    video_path: Path,
+    video_url: str,
+) -> None:
+    await set_feature_status(job_id, "shot_classifier", "processing")
+    try:
+        result = await _shot_classifier_service.run(
+            artifacts,
+            video_path=video_path,
+            video_url=video_url,
+        )
         await store_result(
             job_id,
-            "shot_similarity",
+            "shot_classifier",
+            FeatureResult(status="done", result=result.model_dump()),
+        )
+    except FeatureError as exc:
+        logger.error("shot_classifier failed for {}: {}", job_id, exc)
+        await store_result(
+            job_id,
+            "shot_classifier",
+            FeatureResult(status="failed", error=str(exc)),
+        )
+    except Exception as exc:
+        logger.exception("Unexpected shot_classifier failure for {}", job_id)
+        await store_result(
+            job_id,
+            "shot_classifier",
             FeatureResult(status="failed", error=str(exc)),
         )
 
@@ -157,7 +193,8 @@ async def process_job(
     implemented_features = [
         feature_name
         for feature_name in selected_features
-        if feature_name in {"bowler_performance", "action_legality", "shot_similarity"}
+        if feature_name
+        in {"bowler_performance", "action_legality", "shot_classifier", "shot_similarity"}
     ]
     if not implemented_features:
         logger.info("No implemented background features selected for {}", job_id)
@@ -174,7 +211,8 @@ async def process_job(
             video_path,
             calibration,
             require_ball_path=bool(
-                {"bowler_performance", "shot_similarity"} & set(implemented_features)
+                {"bowler_performance", "shot_classifier", "shot_similarity"}
+                & set(implemented_features)
             ),
         )
     except Exception as exc:
@@ -191,6 +229,8 @@ async def process_job(
             await run_bowler_performance(job_id, artifacts, calibration, fps, safe_name)
         if "action_legality" in implemented_features:
             await run_action_legality(job_id, artifacts, safe_name)
+        if "shot_classifier" in implemented_features:
+            await run_shot_classifier(job_id, artifacts, video_path, safe_name)
         if "shot_similarity" in implemented_features:
             await run_shot_similarity(job_id, artifacts, safe_name)
     finally:
@@ -200,6 +240,9 @@ async def process_job(
 @router.post("/analyze")
 async def analyze_video(
     background_tasks: BackgroundTasks,
+    current_user: Annotated[UserProfile, Depends(require_entitlement)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    *,
     video: UploadFile = VIDEO_FILE,
     calibration: str = CALIBRATION_FORM,
     features: str = FEATURES_FORM,
@@ -228,6 +271,12 @@ async def analyze_video(
     job_id = str(uuid4())
     await store_calibration(job_id, calibration_data)
     await initialize_job_status(job_id)
+    try:
+        await _user_service.enforce_clip_quota(session, current_user.id)
+    except AuthenticationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except AuthorizationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     background_tasks.add_task(
         process_job,
         job_id,

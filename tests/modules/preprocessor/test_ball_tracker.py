@@ -202,7 +202,7 @@ def test_track_marks_roi_entry_but_keeps_tracking_in_batter_mode(
     )
 
     assert len(detections) == 3
-    assert tracker._last_roi_entry_frame_idx == 11
+    assert tracker.last_roi_entry_frame_idx == 11
     assert detections[-1].x == pytest.approx(140.0)
     assert detections[-1].y == pytest.approx(140.0)
 

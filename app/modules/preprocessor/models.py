@@ -58,4 +58,5 @@ class DeliveryContext:
     batter_roi: BatterROI | None
     fps: float = 0.0
     release_point: ReleasePoint | None = None
+    batter_roi_entry_frame_idx: int | None = None
     bat_contact: BatContactResult | None = None

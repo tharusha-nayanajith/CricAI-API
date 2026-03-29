@@ -12,3 +12,15 @@ class CalibrationError(CrickAIError):
 
 class FeatureError(CrickAIError):
     """Raised when a feature module fails unexpectedly."""
+
+
+class AuthenticationError(CrickAIError):
+    """Raised when auth credentials or tokens are invalid."""
+
+
+class AuthorizationError(CrickAIError):
+    """Raised when the current user is not allowed to access a resource."""
+
+
+class ConflictError(CrickAIError):
+    """Raised when a unique-resource conflict occurs."""
