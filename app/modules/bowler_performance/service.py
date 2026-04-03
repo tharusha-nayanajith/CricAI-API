@@ -27,8 +27,12 @@ from app.modules.bowler_performance.models import (
     TrajectoryPointPitch,
 )
 from app.modules.bowler_performance.pitch_coordinates import (
+    BATTING_STUMP_Z_METRES,
+    BOWLING_STUMP_Z_METRES,
+    STUMP_HALF_WIDTH_METRES,
     build_pitch_frame,
     world_points_to_pitch_points,
+    world_to_pitch,
 )
 from app.modules.bowler_performance.ransac import BallPathCleaner
 from app.modules.bowler_performance.trajectory import build_anchor_trajectory
@@ -55,6 +59,7 @@ class BowlerPerformanceAnalyzer:
             artifacts.bat_contact_frame is not None,
         )
         loop = asyncio.get_running_loop()
+        calibration = calibration.best_per_channel()
 
         try:
             logger.info("Cleaning ball path with RANSAC")
@@ -86,7 +91,13 @@ class BowlerPerformanceAnalyzer:
             )
             world_points = await loop.run_in_executor(
                 None,
-                partial(pixels_to_world_points, ransac_result.inliers, intrinsic, extrinsic),
+                partial(
+                    pixels_to_world_points,
+                    ransac_result.inliers,
+                    intrinsic,
+                    extrinsic,
+                    fps,
+                ),
             )
             if len(world_points) < 3:
                 raise FeatureError("Too few valid 3D world points after unprojection")
@@ -115,9 +126,20 @@ class BowlerPerformanceAnalyzer:
                     pitch_points,
                     ransac_result.inliers,
                     ransac_result.bounce_frame,
+                    (
+                        float(artifacts.release_point.timestamp_s)
+                        if artifacts.release_point is not None
+                        else None
+                    ),
                     reconstruction_sanity.trajectory_reliable,
                     _trajectory_warning(reconstruction_sanity),
                 ),
+            )
+            _log_bounce_neighborhood_debug(
+                world_points,
+                pitch_points,
+                ransac_result.bounce_frame,
+                calibration,
             )
             camera_calibration = await loop.run_in_executor(
                 None,
@@ -142,8 +164,20 @@ class BowlerPerformanceAnalyzer:
                         extrinsic,
                         result.speed_kmh,
                         result.swing_metres,
+                        (
+                            float(result.bounce_point.x_metres)
+                            if result.bounce_point is not None
+                            else None
+                        ),
                     ),
                 )
+            _log_stadium_basis_debug(
+                pitch_frame,
+                result,
+                ball_track,
+                ransac_result.bounce_frame,
+            )
+            effective_ball_track = ball_track
             delivery_features = _build_delivery_features(
                 artifacts,
                 fps,
@@ -151,7 +185,7 @@ class BowlerPerformanceAnalyzer:
                 ransac_result.inliers,
                 ransac_result.bounce_frame,
                 result,
-                ball_track,
+                effective_ball_track,
             )
             wicket_risk = (
                 await loop.run_in_executor(
@@ -166,14 +200,14 @@ class BowlerPerformanceAnalyzer:
                     "delivery_features": delivery_features,
                     "wicket_risk": wicket_risk,
                     "video_url": video_url,
-                    "ball_track": ball_track,
+                    "ball_track": effective_ball_track,
                     "camera_calibration": camera_calibration,
                     "flutter_payload": [
                         FlutterPayloadEntry(
                             video_url=video_url,
                             delivery_features=delivery_features,
                             wicket_risk=wicket_risk,
-                            ball_track=ball_track,
+                            ball_track=effective_ball_track,
                             camera_calibration=camera_calibration,
                         )
                     ],
@@ -186,7 +220,8 @@ class BowlerPerformanceAnalyzer:
 
         logger.info(
             "Completed bowler_performance analysis speed_kmh={} swing_metres={} "
-            "inlier_count={} trajectory_reliable={}",
+            "length_class={} bounce_point={} wicket_risk_band={} wicket_risk_pct={} "
+            "wicket_risk_model={} inlier_count={} trajectory_reliable={}",
             (
                 f"{result.speed_kmh:.2f}"
                 if result.speed_kmh is not None
@@ -197,10 +232,89 @@ class BowlerPerformanceAnalyzer:
                 if result.swing_metres is not None
                 else "unavailable"
             ),
+            (
+                result.length_class.value
+                if result.length_class is not None
+                else "unavailable"
+            ),
+            (
+                {
+                    "x": round(float(result.bounce_point.x_metres), 3),
+                    "z": round(float(result.bounce_point.z_metres), 3),
+                }
+                if result.bounce_point is not None
+                else None
+            ),
+            (
+                result.wicket_risk.risk_band.value
+                if result.wicket_risk is not None
+                else "unavailable"
+            ),
+            (
+                f"{result.wicket_risk.percentage:.1f}"
+                if result.wicket_risk is not None
+                else "unavailable"
+            ),
+            (
+                f"{result.wicket_risk.model_name}:{result.wicket_risk.model_version}"
+                if result.wicket_risk is not None
+                else "unavailable"
+            ),
             result.inlier_count,
             result.trajectory_reliable,
         )
         return result
+
+
+def _log_bounce_neighborhood_debug(
+    world_points: list[tuple[BallDetection, np.ndarray]],
+    pitch_points: list[tuple[BallDetection, np.ndarray]],
+    bounce_frame: int | None,
+    calibration: CalibrationData,
+) -> None:
+    batting_stump_bases = {
+        keypoint.channel_index: [float(keypoint.x), float(keypoint.y)]
+        for keypoint in calibration.keypoints
+        if keypoint.channel_index in (0, 2, 4)
+    }
+    if bounce_frame is None or not world_points or not pitch_points:
+        logger.info(
+            "Bounce neighborhood debug bounce_frame={} batting_stump_bases={} samples={}",
+            bounce_frame,
+            batting_stump_bases,
+            [],
+        )
+        return
+
+    pitch_by_frame = {
+        detection.frame_idx: pitch_point
+        for detection, pitch_point in pitch_points
+    }
+    samples: list[dict[str, object]] = []
+    for detection, world_point in world_points:
+        if abs(detection.frame_idx - bounce_frame) > 2:
+            continue
+        pitch_point = pitch_by_frame.get(detection.frame_idx)
+        samples.append(
+            {
+                "frame_idx": int(detection.frame_idx),
+                "pixel_x": float(detection.x),
+                "pixel_y": float(detection.y),
+                "world_x": float(world_point[0]),
+                "world_y": float(world_point[1]),
+                "world_z": float(world_point[2]),
+                "pitch_x": float(pitch_point[0]) if pitch_point is not None else None,
+                "pitch_z": float(pitch_point[2]) if pitch_point is not None else None,
+            }
+        )
+
+    samples.sort(key=lambda item: (abs(item["frame_idx"] - bounce_frame), item["frame_idx"]))
+    logger.info(
+        "Bounce neighborhood debug bounce_frame={} batting_stump_bases={} samples={}",
+        bounce_frame,
+        batting_stump_bases,
+        samples,
+    )
 
 
 def _trajectory_warning(sanity: ReconstructionSanity) -> str | None:
@@ -232,6 +346,7 @@ def _build_ball_track_payload(
     extrinsic: np.ndarray,
     speed_kmh: float | None,
     swing_metres: float | None,
+    canonical_bounce_pitch_x: float | None,
 ) -> BallTrackPayload | None:
     trajectory = build_anchor_trajectory(
         artifacts,
@@ -246,9 +361,45 @@ def _build_ball_track_payload(
 
     frame_values = trajectory.frame_values
     world_xyz = trajectory.world_points
-    pitch_xyz = trajectory.pitch_points
+    pitch_xyz = trajectory.pitch_points.copy()
+
+    bounce_index = (
+        int(np.argmin(np.abs(frame_values - bounce_frame)))
+        if bounce_frame is not None
+        else None
+    )
+    if bounce_index is not None and canonical_bounce_pitch_x is not None:
+        pitch_xyz[:, 0] = _stabilize_lateral_path(
+            pitch_xyz[:, 0],
+            bounce_index,
+            canonical_bounce_pitch_x,
+        )
+
     stadium_xyz = world_xyz.copy()
     stadium_xyz[:, 0] = pitch_xyz[:, 0]
+
+    release_pitch = pitch_xyz[0]
+    bounce_pitch = pitch_xyz[bounce_index] if bounce_index is not None else None
+    target_pitch = pitch_xyz[-1]
+    pitch_x_axis = getattr(pitch_frame, "x_axis_world", None)
+    logger.info(
+        "Ball-track lateral debug x_axis_world={} release_world={} "
+        "bounce_world={} target_world={} release_pitch={} bounce_pitch={} "
+        "target_pitch={} first5_3d_x={} first5_pitch_x={}",
+        (
+            [float(value) for value in pitch_x_axis.tolist()]
+            if pitch_x_axis is not None
+            else None
+        ),
+        [float(value) for value in trajectory.release_anchor.tolist()],
+        [float(value) for value in trajectory.bounce_anchor.tolist()],
+        [float(value) for value in trajectory.target_anchor.tolist()],
+        [float(value) for value in release_pitch.tolist()],
+        [float(value) for value in bounce_pitch.tolist()] if bounce_pitch is not None else None,
+        [float(value) for value in target_pitch.tolist()],
+        [float(value) for value in stadium_xyz[:5, 0].tolist()],
+        [float(value) for value in pitch_xyz[:5, 0].tolist()],
+    )
 
     def fit_axis(values: np.ndarray) -> list[float]:
         degree = 2 if len(frame_values) >= 3 else 1
@@ -269,11 +420,6 @@ def _build_ball_track_payload(
         deviation(stadium_xyz[:, 1], coeff_y),
         deviation(stadium_xyz[:, 2], coeff_z),
     ]
-    bounce_index = (
-        int(np.argmin(np.abs(frame_values - bounce_frame)))
-        if bounce_frame is not None
-        else None
-    )
     return BallTrackPayload(
         pitch_x=(
             float(pitch_xyz[bounce_index, 0]) if bounce_index is not None else None
@@ -311,6 +457,69 @@ def _build_ball_track_payload(
     )
 
 
+def _stabilize_lateral_path(
+    lateral_values: np.ndarray,
+    bounce_index: int,
+    canonical_bounce_pitch_x: float,
+) -> np.ndarray:
+    stabilized = np.asarray(lateral_values, dtype=np.float64).copy()
+    if stabilized.size == 0:
+        return stabilized
+
+    stabilized[bounce_index] = float(canonical_bounce_pitch_x)
+    stabilized[: bounce_index + 1] = _quadratic_lateral_segment(
+        stabilized[: bounce_index + 1],
+        float(stabilized[0]),
+        float(canonical_bounce_pitch_x),
+    )
+    stabilized[bounce_index:] = _quadratic_lateral_segment(
+        stabilized[bounce_index:],
+        float(canonical_bounce_pitch_x),
+        float(stabilized[-1]),
+    )
+    stabilized[bounce_index] = float(canonical_bounce_pitch_x)
+    return stabilized
+
+
+def _quadratic_lateral_segment(
+    observed_values: np.ndarray,
+    start_value: float,
+    end_value: float,
+) -> np.ndarray:
+    value_count = len(observed_values)
+    if value_count <= 2:
+        segment = np.asarray(observed_values, dtype=np.float64).copy()
+        segment[0] = start_value
+        segment[-1] = end_value
+        return segment
+
+    t_values = np.linspace(0.0, 1.0, value_count, dtype=np.float64)
+    coeff = 2.0 * (1.0 - t_values) * t_values
+    base = ((1.0 - t_values) ** 2) * start_value + (t_values**2) * end_value
+    valid_mask = coeff > 1e-6
+    if not np.any(valid_mask):
+        segment = np.linspace(start_value, end_value, value_count, dtype=np.float64)
+        segment[0] = start_value
+        segment[-1] = end_value
+        return segment
+
+    observed = np.asarray(observed_values, dtype=np.float64)
+    control_value = float(
+        np.mean(
+            (observed[valid_mask] - base[valid_mask])
+            / coeff[valid_mask]
+        )
+    )
+    segment = (
+        ((1.0 - t_values) ** 2) * start_value
+        + coeff * control_value
+        + (t_values**2) * end_value
+    )
+    segment[0] = start_value
+    segment[-1] = end_value
+    return segment.astype(np.float64)
+
+
 def _build_camera_calibration_payload(
     calibration: CalibrationData,
     intrinsic: np.ndarray,
@@ -344,6 +553,106 @@ def _build_camera_calibration_payload(
         rotation_matrix_array=[float(value) for value in rotation_matrix.reshape(-1).tolist()],
         fovy=float(calibration.fov),
     )
+
+
+def _log_stadium_basis_debug(
+    pitch_frame,
+    result: BowlerPerformanceResult,
+    ball_track: BallTrackPayload | None,
+    bounce_frame: int | None,
+) -> None:
+    if not hasattr(pitch_frame, "batting_origin_world") or not hasattr(
+        pitch_frame,
+        "x_axis_world",
+    ):
+        logger.info(
+            "Stadium basis debug bounce_result={} ball_track_pitch_x={} "
+            "bounce_track_pitch={} bounce_track_3d={} batting_stumps_pitch={} "
+            "bowling_stumps_pitch={}",
+            (
+                {
+                    "x": float(result.bounce_point.x_metres),
+                    "z": float(result.bounce_point.z_metres),
+                }
+                if result.bounce_point is not None
+                else None
+            ),
+            ball_track.pitch_x if ball_track is not None else None,
+            None,
+            None,
+            None,
+            None,
+        )
+        return
+
+    batting_stumps_world = [
+        [-STUMP_HALF_WIDTH_METRES, 0.0, BATTING_STUMP_Z_METRES],
+        [0.0, 0.0, BATTING_STUMP_Z_METRES],
+        [STUMP_HALF_WIDTH_METRES, 0.0, BATTING_STUMP_Z_METRES],
+    ]
+    bowling_stumps_world = [
+        [-STUMP_HALF_WIDTH_METRES, 0.0, BOWLING_STUMP_Z_METRES],
+        [0.0, 0.0, BOWLING_STUMP_Z_METRES],
+        [STUMP_HALF_WIDTH_METRES, 0.0, BOWLING_STUMP_Z_METRES],
+    ]
+    batting_stumps_pitch = [
+        world_to_pitch(np.asarray(point, dtype=np.float64), pitch_frame).tolist()
+        for point in batting_stumps_world
+    ]
+    bowling_stumps_pitch = [
+        world_to_pitch(np.asarray(point, dtype=np.float64), pitch_frame).tolist()
+        for point in bowling_stumps_world
+    ]
+    bounce_track_pitch = None
+    bounce_track_3d = None
+    if ball_track is not None and bounce_frame is not None:
+        if ball_track.trajectory_points_pitch:
+            bounce_track_pitch = min(
+                ball_track.trajectory_points_pitch,
+                key=lambda point: abs(point.frame_idx - float(bounce_frame)),
+            )
+        if ball_track.trajectory_points_3d:
+            bounce_track_3d = min(
+                ball_track.trajectory_points_3d,
+                key=lambda point: abs(point.frame_idx - float(bounce_frame)),
+            )
+
+    logger.info(
+        "Stadium basis debug bounce_result={} ball_track_pitch_x={} "
+        "bounce_track_pitch={} bounce_track_3d={} batting_stumps_pitch={} "
+        "bowling_stumps_pitch={}",
+        (
+            {
+                "x": float(result.bounce_point.x_metres),
+                "z": float(result.bounce_point.z_metres),
+            }
+            if result.bounce_point is not None
+            else None
+        ),
+        ball_track.pitch_x if ball_track is not None else None,
+        (
+            {
+                "frame_idx": float(bounce_track_pitch.frame_idx),
+                "pitch_x": float(bounce_track_pitch.pitch_x),
+                "pitch_z": float(bounce_track_pitch.pitch_z),
+            }
+            if bounce_track_pitch is not None
+            else None
+        ),
+        (
+            {
+                "frame_idx": float(bounce_track_3d.frame_idx),
+                "x": float(bounce_track_3d.x),
+                "y": float(bounce_track_3d.y),
+                "z": float(bounce_track_3d.z),
+            }
+            if bounce_track_3d is not None
+            else None
+        ),
+        batting_stumps_pitch,
+        bowling_stumps_pitch,
+    )
+
 
 
 def _build_delivery_features(
@@ -549,3 +858,4 @@ def _nearest_pitch_point(
     if frame_idx is None:
         return points[-1]
     return min(points, key=lambda point: abs(point.frame_idx - frame_idx))
+

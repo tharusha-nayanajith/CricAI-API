@@ -1,12 +1,34 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import cos, pi, sin, tan
+from math import asin, atan2, cos, pi, sin, tan
 
+import cv2
 import numpy as np
+from loguru import logger
 
 from app.models.calibration import CalibrationData
 from app.modules.preprocessor.models import BallDetection
+
+STUMP_HALF_WIDTH_METRES = 0.0954
+STUMP_HEIGHT_METRES = 0.711
+BATTING_STUMP_Z_METRES = -10.059
+BOWLING_STUMP_Z_METRES = 10.059
+
+STUMP_WORLD_BY_CHANNEL: dict[int, tuple[float, float, float]] = {
+    0: (-STUMP_HALF_WIDTH_METRES, 0.0, BATTING_STUMP_Z_METRES),
+    1: (-STUMP_HALF_WIDTH_METRES, STUMP_HEIGHT_METRES, BATTING_STUMP_Z_METRES),
+    2: (0.0, 0.0, BATTING_STUMP_Z_METRES),
+    3: (0.0, STUMP_HEIGHT_METRES, BATTING_STUMP_Z_METRES),
+    4: (STUMP_HALF_WIDTH_METRES, 0.0, BATTING_STUMP_Z_METRES),
+    5: (STUMP_HALF_WIDTH_METRES, STUMP_HEIGHT_METRES, BATTING_STUMP_Z_METRES),
+    6: (-STUMP_HALF_WIDTH_METRES, 0.0, BOWLING_STUMP_Z_METRES),
+    7: (-STUMP_HALF_WIDTH_METRES, STUMP_HEIGHT_METRES, BOWLING_STUMP_Z_METRES),
+    8: (0.0, 0.0, BOWLING_STUMP_Z_METRES),
+    9: (0.0, STUMP_HEIGHT_METRES, BOWLING_STUMP_Z_METRES),
+    10: (STUMP_HALF_WIDTH_METRES, 0.0, BOWLING_STUMP_Z_METRES),
+    11: (STUMP_HALF_WIDTH_METRES, STUMP_HEIGHT_METRES, BOWLING_STUMP_Z_METRES),
+}
 
 
 @dataclass(slots=True)
@@ -22,6 +44,16 @@ class ReconstructionSanity:
     implausible_depth_range: bool
     implausible_step_jump: bool
     trajectory_reliable: bool
+
+
+@dataclass(slots=True)
+class RefinedCameraPose:
+    extrinsic: np.ndarray
+    position: np.ndarray
+    rotation_euler: np.ndarray
+    reprojection_error_px: float | None
+    correspondence_count: int
+    refined: bool
 
 
 def build_intrinsic_matrix(calibration: CalibrationData) -> np.ndarray:
@@ -47,6 +79,98 @@ def build_extrinsic_matrix(calibration: CalibrationData) -> np.ndarray:
     return np.hstack([rotation_matrix, translation.reshape(3, 1)])
 
 
+def refine_extrinsic_matrix(
+    calibration: CalibrationData,
+    intrinsic: np.ndarray,
+    initial_extrinsic: np.ndarray,
+) -> RefinedCameraPose:
+    correspondences = _stump_correspondences(calibration)
+    initial_position, initial_rotation_euler = decompose_extrinsic_matrix(initial_extrinsic)
+    if len(correspondences) < 4:
+        return RefinedCameraPose(
+            extrinsic=initial_extrinsic,
+            position=initial_position,
+            rotation_euler=initial_rotation_euler,
+            reprojection_error_px=None,
+            correspondence_count=len(correspondences),
+            refined=False,
+        )
+
+    object_points = np.asarray(
+        [world_point for _keypoint, world_point in correspondences],
+        dtype=np.float64,
+    )
+    image_points = np.asarray(
+        [[keypoint.x, keypoint.y] for keypoint, _world_point in correspondences],
+        dtype=np.float64,
+    )
+    rotation_matrix = initial_extrinsic[:, :3]
+    translation = initial_extrinsic[:, 3].reshape(3, 1)
+    rotation_vector, _ = cv2.Rodrigues(rotation_matrix)
+    distortion = np.zeros((4, 1), dtype=np.float64)
+
+    try:
+        solved, rotation_vector, translation = cv2.solvePnP(
+            object_points,
+            image_points,
+            intrinsic,
+            distortion,
+            rvec=rotation_vector,
+            tvec=translation,
+            useExtrinsicGuess=True,
+            flags=cv2.SOLVEPNP_ITERATIVE,
+        )
+    except cv2.error:
+        solved = False
+
+    if not solved:
+        return RefinedCameraPose(
+            extrinsic=initial_extrinsic,
+            position=initial_position,
+            rotation_euler=initial_rotation_euler,
+            reprojection_error_px=None,
+            correspondence_count=len(correspondences),
+            refined=False,
+        )
+
+    refined_rotation, _ = cv2.Rodrigues(rotation_vector)
+    refined_translation = np.asarray(translation, dtype=np.float64).reshape(3, 1)
+    refined_extrinsic = np.hstack([refined_rotation, refined_translation])
+    refined_position = (-refined_rotation.T @ refined_translation).reshape(3)
+    refined_rotation_euler = _rotation_to_euler(refined_rotation)
+    reprojection_error = _reprojection_error_px(
+        object_points,
+        image_points,
+        intrinsic,
+        refined_rotation,
+        refined_translation,
+    )
+    logger.info(
+        "Camera pose refinement correspondences={} reprojection_error_px={} "
+        "position={} rotation_euler={}",
+        len(correspondences),
+        reprojection_error,
+        [float(value) for value in refined_position.tolist()],
+        [float(value) for value in refined_rotation_euler.tolist()],
+    )
+    return RefinedCameraPose(
+        extrinsic=refined_extrinsic,
+        position=refined_position,
+        rotation_euler=refined_rotation_euler,
+        reprojection_error_px=reprojection_error,
+        correspondence_count=len(correspondences),
+        refined=True,
+    )
+
+
+def decompose_extrinsic_matrix(extrinsic: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    rotation_matrix = np.asarray(extrinsic[:, :3], dtype=np.float64)
+    translation = np.asarray(extrinsic[:, 3], dtype=np.float64).reshape(3, 1)
+    position = (-rotation_matrix.T @ translation).reshape(3)
+    rotation_euler = _rotation_to_euler(rotation_matrix)
+    return position, rotation_euler
+
+
 def _euler_to_rotation(rotation_euler: np.ndarray) -> np.ndarray:
     rx, ry, rz = rotation_euler[0], rotation_euler[1], rotation_euler[2]
     cos_z = cos(rz)
@@ -70,11 +194,87 @@ def _euler_to_rotation(rotation_euler: np.ndarray) -> np.ndarray:
     return np.array([row0, row1, row2], dtype=np.float64)
 
 
+def _rotation_to_euler(rotation_matrix: np.ndarray) -> np.ndarray:
+    matrix = np.asarray(rotation_matrix, dtype=np.float64)
+    sin_y = -float(matrix[0, 2])
+    sin_y = min(1.0, max(-1.0, sin_y))
+    ry = asin(sin_y)
+    cos_y = cos(ry)
+    if abs(cos_y) > 1e-9:
+        rx = atan2(-float(matrix[1, 2]), -float(matrix[2, 2]))
+        rz = atan2(float(matrix[0, 1]), float(matrix[0, 0]))
+    else:
+        rx = 0.0
+        rz = atan2(float(matrix[1, 0]), -float(matrix[1, 1]))
+    return np.array([rx, ry, rz], dtype=np.float64)
+
+
+def _stump_correspondences(
+    calibration: CalibrationData,
+) -> list[tuple[object, tuple[float, float, float]]]:
+    correspondences: list[tuple[object, tuple[float, float, float]]] = []
+    for keypoint in calibration.keypoints:
+        world_point = STUMP_WORLD_BY_CHANNEL.get(keypoint.channel_index)
+        if world_point is None:
+            continue
+        correspondences.append((keypoint, world_point))
+    return correspondences
+
+
+def _reprojection_error_px(
+    object_points: np.ndarray,
+    image_points: np.ndarray,
+    intrinsic: np.ndarray,
+    rotation_matrix: np.ndarray,
+    translation: np.ndarray,
+) -> float:
+    rotation_vector, _ = cv2.Rodrigues(rotation_matrix)
+    projected, _ = cv2.projectPoints(
+        object_points,
+        rotation_vector,
+        translation,
+        intrinsic,
+        np.zeros((4, 1), dtype=np.float64),
+    )
+    residual = projected.reshape(-1, 2) - image_points.reshape(-1, 2)
+    return float(np.sqrt(np.mean(np.sum(residual**2, axis=1))))
+
+
+def project_world_points_to_image(
+    world_points: np.ndarray,
+    intrinsic: np.ndarray,
+    extrinsic: np.ndarray,
+) -> np.ndarray:
+    points = np.asarray(world_points, dtype=np.float64).reshape(-1, 3)
+    rotation_matrix = np.asarray(extrinsic[:, :3], dtype=np.float64)
+    translation = np.asarray(extrinsic[:, 3], dtype=np.float64).reshape(3, 1)
+    rotation_vector, _ = cv2.Rodrigues(rotation_matrix)
+    projected, _ = cv2.projectPoints(
+        points,
+        rotation_vector,
+        translation,
+        intrinsic,
+        np.zeros((4, 1), dtype=np.float64),
+    )
+    return projected.reshape(-1, 2).astype(np.float64)
+
+
 def unproject_to_ground(
     pixel_x: float,
     pixel_y: float,
     K: np.ndarray,
     RT: np.ndarray,
+) -> np.ndarray | None:
+    return unproject_to_height(pixel_x, pixel_y, K, RT, world_y=0.0)
+
+
+
+def unproject_to_height(
+    pixel_x: float,
+    pixel_y: float,
+    K: np.ndarray,
+    RT: np.ndarray,
+    world_y: float = 0.0,
 ) -> np.ndarray | None:
     image_point = np.array([pixel_x, pixel_y, 1.0], dtype=np.float64)
     ray_cam = np.linalg.inv(K) @ image_point
@@ -88,10 +288,11 @@ def unproject_to_ground(
         return None
 
     ray_world /= norm
-    if abs(float(ray_world[1])) < 1e-9:
+    y_component = float(ray_world[1])
+    if abs(y_component) < 1e-9:
         return None
 
-    ray_scale = -float(camera_center[1]) / float(ray_world[1])
+    ray_scale = (float(world_y) - float(camera_center[1])) / y_component
     if ray_scale < 0.0:
         return None
 
@@ -132,13 +333,61 @@ def pixels_to_world_points(
     detections: list[BallDetection],
     K: np.ndarray,
     RT: np.ndarray,
+    fps: float = 30.0,
+    iterations: int = 3,
 ) -> list[tuple[BallDetection, np.ndarray]]:
+    if not detections:
+        return []
+
     world_points: list[tuple[BallDetection, np.ndarray]] = []
     for detection in detections:
         world_point = unproject_to_ground(detection.x, detection.y, K, RT)
         if world_point is None:
             continue
         world_points.append((detection, world_point))
+
+    if len(world_points) < 4:
+        return world_points
+
+    safe_fps = fps if fps > 0.0 else 30.0
+    gravity = 9.81
+
+    for _ in range(max(0, iterations)):
+        frames = np.asarray(
+            [detection.frame_idx for detection, _world_point in world_points],
+            dtype=np.float64,
+        )
+        heights = np.asarray(
+            [world_point[1] for _detection, world_point in world_points],
+            dtype=np.float64,
+        )
+        time_values = frames / safe_fps
+        corrected_heights = heights + (0.5 * gravity * (time_values**2))
+        velocity_y, initial_y = np.polyfit(time_values, corrected_heights, 1)
+
+        refined_points: list[tuple[BallDetection, np.ndarray]] = []
+        for detection in detections:
+            time_value = float(detection.frame_idx) / safe_fps
+            estimated_y = float(
+                (velocity_y * time_value)
+                + initial_y
+                - (0.5 * gravity * (time_value**2))
+            )
+            estimated_y = max(estimated_y, -0.05)
+            world_point = unproject_to_height(
+                detection.x,
+                detection.y,
+                K,
+                RT,
+                world_y=estimated_y,
+            )
+            if world_point is None:
+                continue
+            refined_points.append((detection, world_point))
+
+        if refined_points:
+            world_points = refined_points
+
     return world_points
 
 
