@@ -54,6 +54,13 @@ SCALER_PATH = "features/SHOT_CLASSIFICATION_SYSTEM/trained_models/scaler.pkl"
 MODEL_FOLDER_PATH = "features/SHOT_CLASSIFICATION_SYSTEM/trained_models"
 SUPPORTED_VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv')
 
+# Analyze-shot API mode selection
+# 1 / "new": EfficientNetB4 + GRU video flow (default)
+# 2 / "legacy": RTMPose + engineered features + ensemble flow
+ANALYZE_SHOT_MODE_NEW = 1
+ANALYZE_SHOT_MODE_LEGACY = 2
+ANALYZE_SHOT_MODE_DEFAULT = ANALYZE_SHOT_MODE_NEW
+
 def supported_extensions_str() -> str:
     """Human-readable extensions for error messages"""
     return ", ".join(ext.upper() for ext in SUPPORTED_VIDEO_EXTENSIONS)

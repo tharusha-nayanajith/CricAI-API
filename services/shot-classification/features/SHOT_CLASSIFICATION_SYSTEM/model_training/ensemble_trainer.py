@@ -80,15 +80,13 @@ class EnsembleTrainer:
         
         return features, metadata, contact_keypoints
     
-    def prepare_dataset(self, dataset_path: str, shot_types: List[str], 
-                       use_augmentation: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+    def prepare_dataset(self, dataset_path: str, shot_types: List[str]) -> Tuple[np.ndarray, np.ndarray]:
         """
         Process all videos and create dataset
         
         Args:
             dataset_path: Path to dataset directory
             shot_types: List of shot type names
-            use_augmentation: Whether to augment data
             
         Returns:
             (X, y) features and labels
@@ -111,6 +109,7 @@ class EnsembleTrainer:
                 f for f in os.listdir(shot_dir)
                 if f.lower().endswith(SUPPORTED_VIDEO_EXTENSIONS)
             ]
+            print(f"\n📂 {shot_type}")
             print(f"\nProcessing {len(video_files)} videos for {shot_type}...")
             
             for idx, video_file in enumerate(video_files):
@@ -132,19 +131,24 @@ class EnsembleTrainer:
                     print(f"  Error processing {video_file}: {str(e)}")
                     continue
         
+        print("\n📊 DATASET SUMMARY (BEFORE AUGMENTATION)")
+        for shot_type in shot_types:
+            count = np.sum(np.array(y) == shot_type)
+            print(f"{shot_type}: {count} samples")
+        print(f"Total samples: {len(y)}")
+
         X = np.array(X)
         y = np.array(y)
         
-        # Apply data augmentation if enabled
-        if use_augmentation:
-            print(f"\nApplying data augmentation...")
-            X, y = self.augmenter.augment_batch(X, y)
+        print("\n" + "="*50)
+        print("📊 DATASET SUMMARY (BEFORE AUGMENTATION)")
+        print("="*50)
+        print(f"Total samples collected: {len(X)}")
+        print(f"Labels distribution:")
 
-            # Replicate keypoints for augmented samples
-            original_count = len(self.keypoints_cache)
-            for _ in range(self.augmenter.augmentation_factor):
-                self.keypoints_cache.extend(self.keypoints_cache[:original_count])
-                self.metadata_cache.extend(self.metadata_cache[:original_count])
+        unique, counts = np.unique(y, return_counts=True)
+        for label, count in zip(unique, counts):
+            print(f"  {label}: {count}")
         
         return X, y
     
@@ -199,7 +203,7 @@ class EnsembleTrainer:
         
         return gb_model
     
-    def train_all_models(self, X, y, test_size=0.2):
+    def train_all_models(self, X, y, test_size=0.2, use_augmentation=True):
         """Train all models in ensemble"""
         print(f"\n{'='*70}")
         print("ENSEMBLE TRAINING PIPELINE")
@@ -213,12 +217,35 @@ class EnsembleTrainer:
         y_encoded = self.label_encoder.fit_transform(y)
         
         # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y_encoded, test_size=test_size, random_state=42, stratify=y_encoded
+        indices = np.arange(len(X))
+
+        X_train, X_test, y_train, y_test, train_idx, test_idx = train_test_split(
+            X,
+            y_encoded,
+            indices,   # 👈 ADD THIS
+            test_size=test_size,
+            random_state=42,
+            stratify=y_encoded
         )
         
-        print(f"\nTraining set: {len(X_train)} samples")
-        print(f"Testing set: {len(X_test)} samples")
+        print("\n📊 BEFORE AUGMENTATION")
+        print(f"Train samples: {len(X_train)}")
+        print(f"Test samples:  {len(X_test)}")
+
+        # Apply data augmentation if enabled
+        if use_augmentation:
+            X_train_aug, y_train_aug = self.augmenter.augment_batch(X_train, y_train)
+
+            print("\n📊 AFTER AUGMENTATION (TRAIN ONLY)")
+            print(f"Train before: {len(X_train)}")
+            print(f"Train after:  {len(X_train_aug)}")
+            print(f"Test remains: {len(X_test)}")
+
+            X_train = X_train_aug
+            y_train = y_train_aug
+
+        else:
+            print("\n⚠️ No augmentation applied")
         
         # Scale features
         self.scaler = StandardScaler()
@@ -246,10 +273,7 @@ class EnsembleTrainer:
         # Extract and save prototypes WITH KEYPOINTS
         print("\nExtracting prototypes with keypoints...")
         # Combine train and test indices
-        all_indices = np.concatenate([
-            np.where(np.isin(np.arange(len(X)), np.arange(len(X_train))))[0],
-            np.where(np.isin(np.arange(len(X)), np.arange(len(X_train), len(X))))[0]
-        ])
+        all_indices = np.concatenate([train_idx, test_idx])
         
         # Get corresponding keypoints and metadata
         all_keypoints = [self.keypoints_cache[i] for i in all_indices]
@@ -320,6 +344,14 @@ class EnsembleTrainer:
     def _save_processed_data(self, X_train, X_test, y_train, y_test):
         """Save processed data for retraining"""
         data_path = f"{self.model_dir}/ensemble/processed_dataset.npz"
+        print("\n" + "="*50)
+        print("💾 SAVING PROCESSED DATASET")
+        print("="*50)
+        print(f"Path: {data_path}")
+        print(f"X_train shape: {X_train.shape}")
+        print(f"X_test shape:  {X_test.shape}")
+        print(f"y_train shape: {y_train.shape}")
+        print(f"y_test shape:  {y_test.shape}")
         np.savez(data_path,
                  X_train=X_train,
                  X_test=X_test,
@@ -356,7 +388,7 @@ class EnsembleTrainer:
         # Process new data if provided
         if new_data_path and shot_types:
             print(f"\nProcessing new data from {new_data_path}...")
-            X_new, y_new = self.prepare_dataset(new_data_path, shot_types, use_augmentation=True)
+            X_new, y_new = self.prepare_dataset(new_data_path, shot_types)
             
             # Combine with existing data
             if len(X_existing) > 0:
@@ -384,10 +416,14 @@ def main():
     
     # Prepare dataset
     print("Preparing dataset...")
-    X, y = trainer.prepare_dataset(DATASET_PATH, SHOT_TYPES, use_augmentation=True)
+    X, y = trainer.prepare_dataset(DATASET_PATH, SHOT_TYPES)
     
+    np.save(f"{trainer.model_dir}/ensemble/X.npy", X)
+    np.save(f"{trainer.model_dir}/ensemble/y.npy", y)
+    print("✓ Saved raw dataset (X.npy, y.npy)")
+
     # Train models
-    results = trainer.train_all_models(X, y)
+    results = trainer.train_all_models(X, y, use_augmentation=True)
     
     print("\n" + "="*70)
     print("TRAINING COMPLETE")
@@ -396,3 +432,23 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# cd C:\Users\User\Desktop\CricAI\CricAI-API\services\shot-classification
+
+# python - <<'PY'
+# from features.SHOT_CLASSIFICATION_SYSTEM.model_training.ensemble_trainer import EnsembleTrainer
+
+# t = EnsembleTrainer()
+
+# # Step 1: Prepare dataset
+# X, y = t.prepare_dataset(
+#     r'C:\Users\User\Downloads\Cricket-Shots',
+#     ['cut','drive','flick','misc','pull','slog','sweep']
+# )
+
+# print('dataset', X.shape, y.shape)
+
+# # Step 2: Train models (augmentation happens here)
+# t.train_all_models(X, y, use_augmentation=True)
+
+# PY

@@ -64,6 +64,7 @@ $RECYCLE.BIN/
 
 # ML / model files
 *.pth
+!features/SHOT_CLASSIFICATION_SYSTEM/rtmpose_models/rtmpose-m_simcc-aic-coco_420e-256x192-63eb25f7_20230126.pth
 *.pt
 datasets/
 *.pkl
@@ -79,5 +80,13 @@ wandb/
 *.npz
 *.npy
 
-# Ignore everything inside trained_models
-trained_models/
+# Ignore everything inside trained_models (correct path)
+features/SHOT_CLASSIFICATION_SYSTEM/trained_models/*
+
+# BUT keep the video_classifier folder
+!features/SHOT_CLASSIFICATION_SYSTEM/trained_models/video_classifier/
+!features/SHOT_CLASSIFICATION_SYSTEM/trained_models/prototypes/
+
+# Keep all files inside it
+!features/SHOT_CLASSIFICATION_SYSTEM/trained_models/video_classifier/**
+!features/SHOT_CLASSIFICATION_SYSTEM/trained_models/prototypes/**

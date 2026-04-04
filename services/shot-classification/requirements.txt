@@ -27,6 +27,7 @@ mmengine
 seaborn==0.13.2
 xgboost==2.0.3
 ultralytics==8.0.230   # YOLOv8
+tensorflow>=2.13.0     # For video classifier training
 matplotlib==3.8.2      # For 3D plotting
 Pillow==10.1.0         # For GIF generation
 
@@ -36,5 +37,4 @@ python-dotenv
 roboflow
 python-dotenv
 
-onnx==1.15.0
-onnxruntime==1.17.0
+optree==0.13.1         # Avoids Windows access violation seen with newer optree wheels
