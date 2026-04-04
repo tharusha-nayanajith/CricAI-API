@@ -32,16 +32,13 @@ SHOT_CLASS_LABELS = [
     "cut", "drive", "flick", "pull", "slog", "sweep", "misc"
 ]
 
-# Path resolution for user's trained models
+# Path resolution for trained models - self-contained in assets
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
-MODULE_DIR = Path(__file__).resolve().parent
-SERVICES_DIR = MODULE_DIR.parents[3] / "services" / "shot-classification"
-TRAINED_MODELS_DIR = SERVICES_DIR / "features" / "SHOT_CLASSIFICATION_SYSTEM" / "trained_models"
+TRAINED_MODELS_DIR = ASSETS_DIR / "trained_models"
 VIDEO_CLASSIFIER_DIR = TRAINED_MODELS_DIR / "video_classifier"
 PROTOTYPES_PATH = TRAINED_MODELS_DIR / "prototypes" / "shot_prototypes.pkl"
 
-# Fallback paths
-MODEL_PATH = ASSETS_DIR / "model_weights.h5"
+# Fallback external path if needed
 EXTERNAL_MODEL_PATH = (
     Path(__file__).resolve().parents[3].parent / "CricketShotClassification" / "model_weights.h5"
 )
@@ -283,13 +280,12 @@ def _resolve_model_path() -> Path:
             return model_path
         logger.warning("Configured model path does not exist: {}", model_path)
 
-    # Check user's video_classifier directory
+    # Check video_classifier directory (priority order)
     model_paths_to_check = [
         VIDEO_CLASSIFIER_DIR / "model.weights.h5",
         VIDEO_CLASSIFIER_DIR / "best_model.weights.h5",
         VIDEO_CLASSIFIER_DIR / "model_complete.keras",
         ASSETS_DIR / "model_weights.h5",
-        MODEL_PATH,
         EXTERNAL_MODEL_PATH,
     ]
     
