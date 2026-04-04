@@ -125,8 +125,19 @@ class ShotClassifierService:
         # Extract 128-dim feature vector for mistake analysis
         features = _extract_features(frames_normalized)
         
+        # Run optional mistake analysis
+        predicted_shot = SHOT_CLASS_LABELS[predicted_idx]
+        analysis_result = _run_mistake_analysis(predicted_shot, features)
+        mistakes = analysis_result.get("mistakes", [])
+        
+        # Generate AI coaching feedback
+        coaching_feedback = _generate_ai_feedback(predicted_shot, float(scores[predicted_idx]), mistakes)
+        
+        # Build correction summary
+        correction_summary = f"Critical ({len([m for m in mistakes if m.get('severity') == 'critical'])})" if mistakes else "No issues detected"
+        
         return ShotClassifierResult(
-            predicted_shot=SHOT_CLASS_LABELS[predicted_idx],
+            predicted_shot=predicted_shot,
             confidence=float(scores[predicted_idx]),
             probabilities=probabilities,
             frames_used=FRAME_COUNT,
@@ -135,6 +146,9 @@ class ShotClassifierService:
             roi_entry_frame_index=artifacts.batter_roi_entry_frame_idx,
             trigger_source=trigger_source,
             video_url=video_url,
+            mistake_analysis=mistakes,
+            coaching_feedback=coaching_feedback,
+            correction_summary=correction_summary,
         )
 
 
@@ -353,3 +367,81 @@ def get_prototypes() -> dict[str, dict]:
     except Exception as exc:
         logger.error("Failed to load prototypes: {}", exc)
         return {}
+
+
+def _run_mistake_analysis(predicted_shot: str, features: np.ndarray) -> dict:
+    """
+    Run mistake analysis by comparing features against prototypes.
+    Returns visual feedback and mistake list.
+    """
+    try:
+        prototypes = get_prototypes()
+        if not prototypes:
+            return {}
+        
+        # Compare actual features to prototype for predicted shot
+        if predicted_shot not in prototypes:
+            return {}
+        
+        prototype_data = prototypes[predicted_shot]
+        prototype_mean = prototype_data.get('mean', np.zeros(FEATURE_DIM))
+        prototype_std = prototype_data.get('std', np.ones(FEATURE_DIM))
+        
+        # Calculate deviation from prototype
+        deviations = np.abs(features - prototype_mean) / (prototype_std + 1e-6)
+        
+        # Find top deviating components
+        top_indices = np.argsort(deviations)[-5:][::-1]
+        
+        mistakes = []
+        for idx in top_indices:
+            if deviations[idx] > 0.5:  # Significant deviation threshold
+                mistakes.append({
+                    "joint_id": "body_position",
+                    "body_part": "Body Position",
+                    "feature_name": f"embedding_{idx:03d}",
+                    "severity": "critical" if deviations[idx] > 1.0 else "warning",
+                    "actual_value": float(features[idx]),
+                    "expected_value": float(prototype_mean[idx]),
+                    "deviation": float(deviations[idx]),
+                    "explanation": f"Your movement embedding component {idx} was higher than expected for a {predicted_shot}.",
+                    "recommendation": f"Repeat {predicted_shot} drills to align with the learned prototype."
+                })
+        
+        return {
+            "mistakes": mistakes,
+            "prototype_samples": prototype_data.get('samples', 0),
+            "analysis_method": "efficientnetb4_gru_embedding"
+        }
+    except Exception as exc:
+        logger.warning("Mistake analysis failed: {}", exc)
+        return {}
+
+
+def _generate_ai_feedback(predicted_shot: str, confidence: float, mistakes: list) -> str:
+    """
+    Generate AI coaching feedback using Gemini.
+    Falls back to rule-based feedback if API unavailable.
+    """
+    try:
+        from .assets.utils.ai_feedback_generator import AIFeedbackGenerator
+        
+        generator = AIFeedbackGenerator()
+        if generator.client:
+            # Use Gemini for realistic feedback
+            feedback = generator.generate_feedback(
+                predicted_shot=predicted_shot,
+                confidence=confidence,
+                mistakes=mistakes
+            )
+            return feedback
+    except Exception as exc:
+        logger.warning("AI feedback generation failed: {}", exc)
+    
+    # Fallback to rule-based feedback
+    if confidence < 0.7:
+        return f"Low confidence prediction for {predicted_shot}. Review form and positioning."
+    elif mistakes:
+        return f"Significant deviation from correct {predicted_shot} form. Focus on improving the identified body positions."
+    else:
+        return f"Good {predicted_shot} execution. Continue practicing and refining technique."
