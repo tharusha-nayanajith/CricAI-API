@@ -4,6 +4,7 @@ import pytest
 import app.modules.bowler_performance.service as bowler_service
 from app.exceptions import FeatureError
 from app.models.artifacts import VideoArtifacts
+from app.models.calibration import Keypoint
 from app.modules.bowler_performance.models import (
     BowlerPerformanceResult,
     WicketRiskBand,
@@ -82,12 +83,28 @@ def _invalid_world_points(
     inliers: list[BallDetection],
 ) -> list[tuple[BallDetection, np.ndarray]]:
     world_xyz = [
-        np.array([0.0, 0.0, -500.0], dtype=np.float64),
-        np.array([0.1, 0.0, -300.0], dtype=np.float64),
-        np.array([0.2, 0.0, -100.0], dtype=np.float64),
-        np.array([0.3, 0.0, -10.0], dtype=np.float64),
+        np.array([0.0, 0.0, -18.0], dtype=np.float64),
+        np.array([0.1, 0.0, -16.0], dtype=np.float64),
+        np.array([0.2, 0.0, -14.0], dtype=np.float64),
+        np.array([0.3, 0.0, -12.0], dtype=np.float64),
     ]
     return list(zip(inliers, world_xyz, strict=True))
+
+
+def _duplicate_channel_calibration():
+    calibration = CalibrationDataFactory()
+    return calibration.model_copy(
+        update={
+            "detected_channels": 3,
+            "total_detections": 4,
+            "keypoints": [
+                Keypoint(x=10.0, y=20.0, score=0.6, channel_index=0),
+                Keypoint(x=99.0, y=88.0, score=0.2, channel_index=0),
+                Keypoint(x=30.0, y=40.0, score=0.9, channel_index=2),
+                Keypoint(x=50.0, y=60.0, score=0.8, channel_index=4),
+            ],
+        }
+    )
 
 
 def _anchor_trajectory() -> AnchorTrajectory:
@@ -148,9 +165,9 @@ async def test_run_raises_feature_error_when_world_points_are_all_invalid(
         "build_extrinsic_matrix",
         lambda calibration: np.hstack([np.eye(3), np.zeros((3, 1))]),
     )
-    monkeypatch.setattr(bowler_service, "pixels_to_world_points", lambda inliers, K, RT: [])
+    monkeypatch.setattr(bowler_service, "pixels_to_world_points", lambda inliers, K, RT, fps: [])
 
-    with pytest.raises(FeatureError, match="Too few valid 3D world points after unprojection"):
+    with pytest.raises(FeatureError, match="Too few valid 3D world points after outlier filtering"):
         await analyzer.run(artifacts, CalibrationDataFactory(), fps=30.0)
 
 
@@ -172,7 +189,7 @@ async def test_run_returns_bowler_performance_result_with_valid_mocked_inputs(
     monkeypatch.setattr(
         bowler_service,
         "pixels_to_world_points",
-        lambda inliers, K, RT: _world_points(inliers),
+        lambda inliers, K, RT, fps: _world_points(inliers),
     )
     monkeypatch.setattr(
         bowler_service,
@@ -246,6 +263,67 @@ async def test_run_returns_bowler_performance_result_with_valid_mocked_inputs(
     assert payload["flutterPayload"][0]["cameraCalibration"] is not None
     assert result.trajectory_reliable is True
     assert result.trajectory_warning is None
+    assert result.ball_track.trajectory_mode == "anchor_fitted"
+
+
+@pytest.mark.asyncio
+async def test_run_filters_world_point_outlier_before_assessment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analyzer = BowlerPerformanceAnalyzer()
+    artifacts = _artifacts()
+    clean_result = _clean_result(artifacts.ball_path)
+
+    def outlier_world_points(
+        inliers: list[BallDetection],
+    ) -> list[tuple[BallDetection, np.ndarray]]:
+        values = _world_points(inliers)
+        values[2] = (
+            values[2][0],
+            np.array([0.2, 0.8, -1765.0], dtype=np.float64),
+        )
+        return values
+
+    monkeypatch.setattr(analyzer._cleaner, "clean", lambda raw_path, fps: clean_result)
+    monkeypatch.setattr(bowler_service, "build_intrinsic_matrix", lambda calibration: np.eye(3))
+    monkeypatch.setattr(
+        bowler_service,
+        "build_extrinsic_matrix",
+        lambda calibration: np.hstack([np.eye(3), np.zeros((3, 1))]),
+    )
+    monkeypatch.setattr(
+        bowler_service,
+        "pixels_to_world_points",
+        lambda inliers, K, RT, fps: outlier_world_points(inliers),
+    )
+    monkeypatch.setattr(
+        bowler_service,
+        "build_pitch_frame",
+        lambda calibration, K, RT: object(),
+    )
+    monkeypatch.setattr(
+        bowler_service,
+        "world_points_to_pitch_points",
+        lambda world_points, frame: world_points,
+    )
+    monkeypatch.setattr(
+        bowler_service,
+        "build_anchor_trajectory",
+        lambda artifacts, detections, bounce_frame, K, RT, pitch_frame: _anchor_trajectory(),
+    )
+    monkeypatch.setattr(bowler_service, "predict_wicket_risk", lambda delivery_features: None)
+
+    result = await analyzer.run(
+        artifacts,
+        CalibrationDataFactory(),
+        fps=30.0,
+        video_url="sample.mp4",
+    )
+
+    assert result.trajectory_reliable is True
+    assert result.swing_metres is not None
+    assert result.ball_track is not None
+    assert result.ball_track.trajectory_mode == "anchor_fitted"
 
 
 @pytest.mark.asyncio
@@ -266,7 +344,7 @@ async def test_run_marks_trajectory_unavailable_when_world_reconstruction_fails_
     monkeypatch.setattr(
         bowler_service,
         "pixels_to_world_points",
-        lambda inliers, K, RT: _invalid_world_points(inliers),
+        lambda inliers, K, RT, fps: _invalid_world_points(inliers),
     )
     monkeypatch.setattr(
         bowler_service,
@@ -294,9 +372,10 @@ async def test_run_marks_trajectory_unavailable_when_world_reconstruction_fails_
 
     assert result.trajectory_reliable is False
     assert result.trajectory_warning is not None
-    assert result.speed_kmh is None
+    assert result.speed_kmh is not None
+    assert result.raw_speed_ms is not None
+    assert result.speed_kmh == pytest.approx(result.raw_speed_ms * 3.6)
     assert result.swing_metres is None
-    assert result.raw_speed_ms is None
     assert result.ball_track is not None
     assert result.delivery_features is not None
     assert result.wicket_risk is None
@@ -306,3 +385,64 @@ async def test_run_marks_trajectory_unavailable_when_world_reconstruction_fails_
     assert result.flutter_payload
     assert result.flutter_payload[0].ball_track is result.ball_track
     assert result.flutter_payload[0].camera_calibration is result.camera_calibration
+
+
+@pytest.mark.asyncio
+async def test_run_sanitizes_calibration_keypoints_before_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analyzer = BowlerPerformanceAnalyzer()
+    artifacts = _artifacts()
+    clean_result = _clean_result(artifacts.ball_path)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(analyzer._cleaner, "clean", lambda raw_path, fps: clean_result)
+
+    def fake_intrinsic(calibration):
+        captured["intrinsic_calibration"] = calibration
+        return np.eye(3)
+
+    def fake_extrinsic(calibration):
+        captured["extrinsic_calibration"] = calibration
+        return np.hstack([np.eye(3), np.zeros((3, 1))])
+
+    def fake_pitch_frame(calibration, K, RT):
+        captured["pitch_frame_calibration"] = calibration
+        return object()
+
+    monkeypatch.setattr(bowler_service, "build_intrinsic_matrix", fake_intrinsic)
+    monkeypatch.setattr(bowler_service, "build_extrinsic_matrix", fake_extrinsic)
+    monkeypatch.setattr(
+        bowler_service,
+        "pixels_to_world_points",
+        lambda inliers, K, RT, fps: _world_points(inliers),
+    )
+    monkeypatch.setattr(bowler_service, "build_pitch_frame", fake_pitch_frame)
+    monkeypatch.setattr(
+        bowler_service,
+        "world_points_to_pitch_points",
+        lambda world_points, frame: world_points,
+    )
+    monkeypatch.setattr(
+        bowler_service,
+        "build_anchor_trajectory",
+        lambda artifacts, detections, bounce_frame, K, RT, pitch_frame: _anchor_trajectory(),
+    )
+    monkeypatch.setattr(bowler_service, "predict_wicket_risk", lambda delivery_features: None)
+
+    await analyzer.run(
+        artifacts,
+        _duplicate_channel_calibration(),
+        fps=30.0,
+        video_url="sample.mp4",
+    )
+
+    for key in ("intrinsic_calibration", "extrinsic_calibration", "pitch_frame_calibration"):
+        calibration = captured[key]
+        assert len(calibration.keypoints) == 3
+        assert [keypoint.channel_index for keypoint in calibration.keypoints] == [0, 2, 4]
+        assert calibration.keypoints[0].x == 10.0
+        assert calibration.keypoints[0].score == 0.6
+
+
+

@@ -14,11 +14,13 @@ from app.modules.bowler_performance.camera import (
     assess_world_points,
     build_extrinsic_matrix,
     build_intrinsic_matrix,
+    filter_world_point_outliers,
     pixels_to_world_points,
 )
 from app.modules.bowler_performance.metrics import build_result
 from app.modules.bowler_performance.models import (
     BallTrackPayload,
+    BouncePoint,
     BowlerPerformanceResult,
     CameraCalibrationPayload,
     DeliveryFeatures,
@@ -35,7 +37,7 @@ from app.modules.bowler_performance.pitch_coordinates import (
     world_to_pitch,
 )
 from app.modules.bowler_performance.ransac import BallPathCleaner
-from app.modules.bowler_performance.trajectory import build_anchor_trajectory
+from app.modules.bowler_performance.trajectory import AnchorTrajectory, build_anchor_trajectory
 from app.modules.bowler_performance.wicket_risk import predict_wicket_risk
 from app.modules.preprocessor.models import BallDetection
 
@@ -99,11 +101,34 @@ class BowlerPerformanceAnalyzer:
                     fps,
                 ),
             )
+            filtered_world_result = await loop.run_in_executor(
+                None,
+                partial(filter_world_point_outliers, world_points),
+            )
+            world_points = filtered_world_result.points
+            logger.info(
+                "Filtered world points raw={} kept={} removed_frames={}",
+                len(ransac_result.inliers),
+                len(world_points),
+                filtered_world_result.removed_frame_indices,
+            )
             if len(world_points) < 3:
-                raise FeatureError("Too few valid 3D world points after unprojection")
+                raise FeatureError("Too few valid 3D world points after outlier filtering")
             reconstruction_sanity = await loop.run_in_executor(
                 None,
                 partial(assess_world_points, world_points),
+            )
+            logger.info(
+                "Sanity detail all_on_ground={} depth_range={} step_jump={} "
+                "y_abs_max={} z_min={} z_max={} z_span={} max_step={}",
+                reconstruction_sanity.all_points_on_ground,
+                reconstruction_sanity.implausible_depth_range,
+                reconstruction_sanity.implausible_step_jump,
+                reconstruction_sanity.world_y_abs_max,
+                reconstruction_sanity.world_z_min,
+                reconstruction_sanity.world_z_max,
+                reconstruction_sanity.world_z_span,
+                reconstruction_sanity.max_step_distance_m,
             )
 
             logger.info("Converting world points to standardized pitch coordinates")
@@ -115,6 +140,25 @@ class BowlerPerformanceAnalyzer:
             pitch_points = await loop.run_in_executor(
                 None,
                 partial(world_points_to_pitch_points, world_points, pitch_frame),
+            )
+
+            anchor_trajectory = None
+            if artifacts.release_point is not None:
+                anchor_trajectory = await loop.run_in_executor(
+                    None,
+                    partial(
+                        build_anchor_trajectory,
+                        artifacts,
+                        ransac_result.inliers,
+                        ransac_result.bounce_frame,
+                        intrinsic,
+                        extrinsic,
+                        pitch_frame,
+                    ),
+                )
+            canonical_bounce_point = _canonical_bounce_point_from_trajectory(
+                anchor_trajectory,
+                ransac_result.bounce_frame,
             )
 
             logger.info("Computing bowler performance metrics")
@@ -133,6 +177,7 @@ class BowlerPerformanceAnalyzer:
                     ),
                     reconstruction_sanity.trajectory_reliable,
                     _trajectory_warning(reconstruction_sanity),
+                    canonical_bounce_point,
                 ),
             )
             _log_bounce_neighborhood_debug(
@@ -169,6 +214,7 @@ class BowlerPerformanceAnalyzer:
                             if result.bounce_point is not None
                             else None
                         ),
+                        anchor_trajectory,
                     ),
                 )
             _log_stadium_basis_debug(
@@ -347,15 +393,17 @@ def _build_ball_track_payload(
     speed_kmh: float | None,
     swing_metres: float | None,
     canonical_bounce_pitch_x: float | None,
+    trajectory: AnchorTrajectory | None = None,
 ) -> BallTrackPayload | None:
-    trajectory = build_anchor_trajectory(
-        artifacts,
-        detections,
-        bounce_frame,
-        intrinsic,
-        extrinsic,
-        pitch_frame,
-    )
+    if trajectory is None:
+        trajectory = build_anchor_trajectory(
+            artifacts,
+            detections,
+            bounce_frame,
+            intrinsic,
+            extrinsic,
+            pitch_frame,
+        )
     if trajectory is None:
         return None
 
@@ -552,6 +600,21 @@ def _build_camera_calibration_payload(
         focal=focal,
         rotation_matrix_array=[float(value) for value in rotation_matrix.reshape(-1).tolist()],
         fovy=float(calibration.fov),
+    )
+
+
+def _canonical_bounce_point_from_trajectory(
+    trajectory: AnchorTrajectory | None,
+    bounce_frame: int | None,
+) -> BouncePoint | None:
+    if trajectory is None or bounce_frame is None or trajectory.pitch_points.size == 0:
+        return None
+
+    bounce_index = int(np.argmin(np.abs(trajectory.frame_values - float(bounce_frame))))
+    bounce_pitch = trajectory.pitch_points[bounce_index]
+    return BouncePoint(
+        x_metres=float(bounce_pitch[0]),
+        z_metres=float(bounce_pitch[2]),
     )
 
 

@@ -37,3 +37,9 @@ Test_Scripts/
 Wicket_Models/
 Synthetic_Dataset/
 
+
+# Windows metadata
+*:Zone.Identifier
+
+# Local storage artifacts
+*.db

@@ -86,6 +86,7 @@ def fake_redis(monkeypatch: pytest.MonkeyPatch) -> FakeRedis:
     fake = FakeRedis()
     monkeypatch.setattr("app.storage.calibration.get_redis", lambda: fake)
     monkeypatch.setattr("app.storage.results.get_redis", lambda: fake)
+    monkeypatch.setattr("app.storage.video.get_redis", lambda: fake)
     monkeypatch.setattr("app.modules.users.service.get_redis", lambda: fake)
     return fake
 

@@ -8,10 +8,16 @@ from app.modules.bowler_performance.models import (
     LengthClass,
     classify_length,
 )
-from app.modules.bowler_performance.pitch_coordinates import PitchPoint
+from app.modules.bowler_performance.pitch_coordinates import (
+    BOWLING_STUMP_Z_METRES,
+    PitchPoint,
+)
 from app.modules.preprocessor.models import BallDetection
 
 WorldPoint = tuple[BallDetection, np.ndarray]
+
+DEFAULT_PROXY_RELEASE_EXTENSION_METRES = 1.5
+DEFAULT_PROXY_RELEASE_TO_BOUNCE_DISTANCE_METRES = 16.0
 
 
 def compute_speed(
@@ -77,25 +83,63 @@ def compute_bounce_and_length(
     return BouncePoint(x_metres=bounce_x, z_metres=bounce_z), length_class
 
 
+def compute_proxy_speed(
+    inliers: list[BallDetection],
+    bounce_frame: int | None,
+    release_timestamp_s: float | None,
+    bounce_point: BouncePoint | None,
+) -> tuple[float | None, float | None]:
+    if release_timestamp_s is None or bounce_frame is None or not inliers:
+        return None, None
+
+    bounce_detection = min(
+        inliers,
+        key=lambda detection: abs(detection.frame_idx - bounce_frame),
+    )
+    dt = float(bounce_detection.timestamp_s - release_timestamp_s)
+    if dt <= 0.0:
+        return None, None
+
+    bounce_z = bounce_point.z_metres if bounce_point is not None else None
+    if bounce_z is not None and 0.0 <= bounce_z <= BOWLING_STUMP_Z_METRES:
+        distance_metres = (
+            BOWLING_STUMP_Z_METRES
+            - bounce_z
+            + DEFAULT_PROXY_RELEASE_EXTENSION_METRES
+        )
+    else:
+        distance_metres = DEFAULT_PROXY_RELEASE_TO_BOUNCE_DISTANCE_METRES
+
+    speed_ms = float(distance_metres / dt)
+    return speed_ms, speed_ms * 3.6
+
+
 def build_result(
     world_points: list[WorldPoint],
     pitch_points: list[PitchPoint],
     inliers: list[BallDetection],
     bounce_frame: int | None,
+    release_timestamp_s: float | None = None,
     trajectory_reliable: bool = True,
     trajectory_warning: str | None = None,
+    canonical_bounce_point: BouncePoint | None = None,
 ) -> BowlerPerformanceResult:
-    speed_ms: float | None
-    speed_kmh: float | None
-    swing_metres: float | None
-    if trajectory_reliable:
-        speed_ms, speed_kmh = compute_speed(world_points)
-        swing_metres = compute_swing(pitch_points, bounce_frame)
-    else:
-        speed_ms = None
-        speed_kmh = None
-        swing_metres = None
+    _ = world_points
     bounce_point, length_class = compute_bounce_and_length(pitch_points, bounce_frame)
+    if canonical_bounce_point is not None:
+        bounce_point = canonical_bounce_point
+        length_class = classify_length(canonical_bounce_point.z_metres)
+    speed_ms, speed_kmh = compute_proxy_speed(
+        inliers,
+        bounce_frame,
+        release_timestamp_s,
+        bounce_point,
+    )
+    swing_metres = (
+        compute_swing(pitch_points, bounce_frame)
+        if trajectory_reliable
+        else None
+    )
     confidence = float(
         np.mean([detection.confidence for detection in inliers], dtype=np.float64)
     ) if inliers else 0.0
