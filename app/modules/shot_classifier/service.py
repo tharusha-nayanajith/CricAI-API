@@ -221,25 +221,30 @@ def _resolve_model_path() -> Path:
     if configured_path:
         model_path = Path(configured_path)
         if model_path.exists():
+            logger.info("Using model from environment variable: {}", model_path)
             return model_path
-        raise FeatureError(f"Configured shot_classifier model file was not found: {model_path}")
+        logger.warning("Configured model path does not exist: {}", model_path)
 
-    if MODEL_PATH.exists():
-        return MODEL_PATH
+    model_paths_to_check = [
+        ASSETS_DIR / "trained_models" / "video_classifier" / "model.weights.h5",
+        ASSETS_DIR / "trained_models" / "video_classifier" / "best_model.weights.h5",
+        ASSETS_DIR / "trained_models" / "video_classifier" / "model_complete.keras",
+        MODEL_PATH,
+        *sorted(ASSETS_DIR.glob("*.h5")),
+        EXTERNAL_MODEL_PATH,
+    ]
 
-    asset_candidates = sorted(ASSETS_DIR.glob("*.h5"))
-    if asset_candidates:
-        logger.info(
-            "Using shot_classifier model asset {} from {}",
-            asset_candidates[0].name,
-            ASSETS_DIR,
-        )
-        return asset_candidates[0]
+    for path in model_paths_to_check:
+        if path.exists():
+            logger.info("Found shot_classifier model at: {}", path)
+            return path
 
-    if EXTERNAL_MODEL_PATH.exists():
-        return EXTERNAL_MODEL_PATH
+    logger.error(
+        "Shot classifier model not found. Checked paths: {}. "
+        "Set SHOT_CLASSIFIER_MODEL_PATH environment variable.",
+        model_paths_to_check,
+    )
     raise FeatureError(
         "Missing shot_classifier model file. Set SHOT_CLASSIFIER_MODEL_PATH or place "
-        f"model_weights.h5 or another .h5 model in {ASSETS_DIR}, or place model_weights.h5 "
-        f"at {EXTERNAL_MODEL_PATH}."
+        f"a model file at one of: {[str(p) for p in model_paths_to_check]}"
     )
