@@ -24,6 +24,13 @@ class BallDetection:
     confidence: float
 
 
+@dataclass(slots=True)
+class FrameBallDetections:
+    frame_idx: int
+    timestamp_s: float
+    detections: list[BallDetection]
+
+
 class BatterMode(enum.Enum):
     NONE = "none"
     PRESENT = "present"

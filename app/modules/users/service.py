@@ -106,7 +106,11 @@ class UserService:
         await redis.delete(_refresh_token_key(jti))
 
     async def get_user_by_id(self, session: AsyncSession, user_id: UUID) -> UserRecord | None:
-        return await session.get(UserRecord, user_id)
+        user = await session.get(UserRecord, user_id)
+        if user is None:
+            return None
+        _normalize_user_record_datetimes(user)
+        return user
 
     async def get_current_user_from_access_token(
         self,
@@ -147,9 +151,12 @@ class UserService:
             raise AuthenticationError("User is not available.")
 
         now = datetime.now(UTC)
-        if user.quota_reset_at <= now:
+        quota_reset_at = _coerce_utc(user.quota_reset_at)
+        if quota_reset_at <= now:
             user.clips_used_this_month = 0
             user.quota_reset_at = _next_quota_reset(now)
+        else:
+            user.quota_reset_at = quota_reset_at
 
         limit = TIER_LIMITS.get(user.current_tier, TIER_LIMITS["basic"])
         if limit != UNLIMITED_QUOTA and user.clips_used_this_month >= limit:
@@ -158,6 +165,7 @@ class UserService:
         user.clips_used_this_month += 1
         await session.commit()
         await session.refresh(user)
+        _normalize_user_record_datetimes(user)
         return UserProfile.model_validate(user)
 
     async def handle_revenuecat_webhook(
@@ -366,7 +374,7 @@ def _derive_tier(event: dict) -> TierName:
 def _extract_expiration(event: dict) -> datetime | None:
     for key in ("expiration_at_ms", "expires_at_ms"):
         value = event.get(key)
-        if isinstance(value, (int, float)):
+        if isinstance(value, int | float):
             return datetime.fromtimestamp(float(value) / 1000.0, tz=UTC)
     for key in ("expiration_at", "expires_at"):
         value = event.get(key)
@@ -399,5 +407,18 @@ def _has_active_entitlement(status: str, expires_at: datetime | None) -> bool:
     if status == "active":
         return True
     if status == "canceled" and expires_at is not None:
-        return expires_at > datetime.now(UTC)
+        return _coerce_utc(expires_at) > datetime.now(UTC)
     return False
+
+
+def _coerce_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _normalize_user_record_datetimes(user: UserRecord) -> None:
+    user.created_at = _coerce_utc(user.created_at)
+    user.quota_reset_at = _coerce_utc(user.quota_reset_at)
+    if user.entitlement_expires_at is not None:
+        user.entitlement_expires_at = _coerce_utc(user.entitlement_expires_at)

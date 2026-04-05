@@ -226,11 +226,22 @@ async def process_job(
     else:
         if "bowler_performance" in implemented_features:
             fps = _derive_fps(artifacts.ball_path)
-            await run_bowler_performance(job_id, artifacts, calibration, fps, safe_name)
+            await run_bowler_performance(
+                job_id,
+                artifacts,
+                calibration,
+                fps,
+                safe_name,
+            )
         if "action_legality" in implemented_features:
             await run_action_legality(job_id, artifacts, safe_name)
         if "shot_classifier" in implemented_features:
-            await run_shot_classifier(job_id, artifacts, video_path, safe_name)
+            await run_shot_classifier(
+                job_id,
+                artifacts,
+                video_path,
+                safe_name,
+            )
         if "shot_similarity" in implemented_features:
             await run_shot_similarity(job_id, artifacts, safe_name)
     finally:

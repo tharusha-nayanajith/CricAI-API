@@ -14,7 +14,13 @@ from app.modules.preprocessor.constants import (
     STANDARDIZED_HEIGHT,
     STANDARDIZED_WIDTH,
 )
-from app.modules.preprocessor.models import BallDetection, BatterMode, BatterROI, ReleasePoint
+from app.modules.preprocessor.models import (
+    BallDetection,
+    BatterMode,
+    BatterROI,
+    FrameBallDetections,
+    ReleasePoint,
+)
 from app.modules.preprocessor.service import VideoPreprocessor
 from tests.conftest import CalibrationDataFactory
 
@@ -233,6 +239,43 @@ def test_track_returns_empty_list_when_confidence_never_exceeds_threshold(
     assert detections == []
 
 
+def test_tracking_window_filters_far_branch_after_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = _make_tracker(monkeypatch)
+    sequence = [
+        [],
+        [],
+        [(100.0, 200.0, 0.95)],
+        [(110.0, 210.0, 0.95)],
+        [(120.0, 220.0, 0.95)],
+        [
+            (130.0, 230.0, 0.94),
+            (520.0, 900.0, 0.99),
+        ],
+    ]
+    iterator = iter(sequence)
+
+    monkeypatch.setattr(
+        "app.modules.preprocessor.ball_tracker.cv2.VideoCapture",
+        lambda _: _FakeCapture(total_frames=6),
+    )
+    monkeypatch.setattr(tracker, "_infer_candidates", lambda frame: next(iterator))
+
+    detections = tracker.track(
+        Path("video.mp4"),
+        release_frame_idx=2,
+        fps=30.0,
+        batter_mode=BatterMode.NONE,
+        batter_roi=None,
+    )
+
+    assert len(detections) == 4
+    assert detections[-1].x == pytest.approx(130.0)
+    assert detections[-1].y == pytest.approx(230.0)
+    assert all(detection.x < 200.0 for detection in detections)
+
+
 def test_track_keeps_multiple_candidates_per_frame_above_threshold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -331,3 +374,139 @@ async def test_run_raises_when_raw_path_is_too_short(monkeypatch: pytest.MonkeyP
 
     with pytest.raises(PreprocessingError, match="Ball path too short: 2 detections"):
         await preprocessor.run(Path("input.mp4"), calibration)
+
+
+def test_track_preserves_grouped_candidates_by_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    tracker = _make_tracker(monkeypatch)
+    sequence = [
+        [],
+        [],
+        [
+            (120.0, 300.0, 0.90),
+            (180.0, 360.0, 0.72),
+            (240.0, 420.0, BALL_CONF_RAW_THRESHOLD - 0.01),
+        ],
+        [
+            (200.0, 500.0, 0.88),
+        ],
+    ]
+    iterator = iter(sequence)
+
+    monkeypatch.setattr(
+        "app.modules.preprocessor.ball_tracker.cv2.VideoCapture",
+        lambda _: _FakeCapture(total_frames=4),
+    )
+    monkeypatch.setattr(tracker, "_infer_candidates", lambda frame: next(iterator))
+
+    tracker.track(
+        Path("video.mp4"),
+        release_frame_idx=2,
+        fps=30.0,
+        batter_mode=BatterMode.NONE,
+        batter_roi=None,
+    )
+
+    frame_candidates = tracker.last_frame_candidates
+
+    assert [frame.frame_idx for frame in frame_candidates] == [2, 3]
+    assert [len(frame.detections) for frame in frame_candidates] == [2, 1]
+    assert frame_candidates[0].detections[0].x == pytest.approx(120.0)
+    assert frame_candidates[1].detections[0].y == pytest.approx(500.0)
+
+
+def test_reset_clears_grouped_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    tracker = _make_tracker(monkeypatch)
+    tracker._last_frame_candidates = [
+        FrameBallDetections(
+            frame_idx=12,
+            timestamp_s=0.4,
+            detections=[
+                BallDetection(frame_idx=12, timestamp_s=0.4, x=10.0, y=20.0, confidence=0.9)
+            ],
+        )
+    ]
+
+    tracker.reset()
+
+    assert tracker.last_frame_candidates == []
+
+
+@pytest.mark.asyncio
+async def test_run_returns_grouped_ball_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    preprocessor = VideoPreprocessor()
+    calibration = CalibrationDataFactory()
+    annotated_frame = np.zeros((STANDARDIZED_HEIGHT, STANDARDIZED_WIDTH, 3), dtype=np.uint8)
+
+    async def _fake_standardize(video_path: Path) -> Path:
+        return video_path
+
+    async def _fake_detect_release(ctx) -> ReleasePoint:
+        _ = ctx
+        return ReleasePoint(
+            frame_idx=12,
+            timestamp_s=0.4,
+            hand_position=(100.0, 200.0),
+            confidence=0.9,
+            annotated_frame=annotated_frame,
+        )
+
+    class _FakeBatterDetector:
+        def detect(self, video_path: Path, calibration_data: CalibrationData):
+            _ = video_path
+            _ = calibration_data
+            return BatterMode.NONE, None
+
+    class _FakeBallTracker:
+        last_roi_entry_frame_idx = None
+        last_frame_candidates = [
+            FrameBallDetections(
+                frame_idx=12,
+                timestamp_s=0.4,
+                detections=[
+                    BallDetection(frame_idx=12, timestamp_s=0.4, x=10.0, y=20.0, confidence=0.9),
+                    BallDetection(frame_idx=12, timestamp_s=0.4, x=12.0, y=22.0, confidence=0.8),
+                ],
+            )
+        ]
+
+        def track(self, *args, **kwargs):
+            _ = args
+            _ = kwargs
+            return [
+                BallDetection(frame_idx=12, timestamp_s=0.4, x=10.0, y=20.0, confidence=0.9),
+                BallDetection(frame_idx=13, timestamp_s=0.43, x=13.0, y=24.0, confidence=0.85),
+                BallDetection(frame_idx=14, timestamp_s=0.47, x=16.0, y=28.0, confidence=0.83),
+            ]
+
+    class _FakeVideoCaptureForFps:
+        def isOpened(self) -> bool:
+            return True
+
+        def get(self, prop: int) -> float:
+            if prop == cv2.CAP_PROP_FPS:
+                return 30.0
+            return 0.0
+
+        def release(self) -> None:
+            return None
+
+    monkeypatch.setattr(preprocessor, "standardize_video", _fake_standardize)
+    monkeypatch.setattr(preprocessor, "_detect_release", _fake_detect_release)
+    monkeypatch.setattr(
+        "app.modules.preprocessor.service.get_batter_detector",
+        lambda: _FakeBatterDetector(),
+    )
+    monkeypatch.setattr(
+        "app.modules.preprocessor.service.get_ball_tracker",
+        lambda: _FakeBallTracker(),
+    )
+    monkeypatch.setattr(
+        "app.modules.preprocessor.service.cv2.VideoCapture",
+        lambda _: _FakeVideoCaptureForFps(),
+    )
+
+    artifacts = await preprocessor.run(Path("input.mp4"), calibration)
+
+    assert len(artifacts.ball_candidates_by_frame) == 1
+    assert artifacts.ball_candidates_by_frame[0].frame_idx == 12
+    assert len(artifacts.ball_candidates_by_frame[0].detections) == 2

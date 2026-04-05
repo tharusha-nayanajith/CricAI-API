@@ -142,6 +142,7 @@ async def test_process_job_runs_action_legality_without_ball_tracking(
         )
 
     monkeypatch.setattr(analyze_module._preprocessor, "run", fake_preprocessor_run)
+
     monkeypatch.setattr(
         analyze_module._action_legality_service,
         "run",
@@ -208,6 +209,7 @@ async def test_process_job_runs_shot_similarity_with_preprocessed_contact_frame(
         )
 
     monkeypatch.setattr(analyze_module._preprocessor, "run", fake_preprocessor_run)
+
     monkeypatch.setattr(
         analyze_module._shot_similarity_service,
         "run",
@@ -275,6 +277,7 @@ async def test_process_job_runs_shot_classifier_with_roi_entry_frame(
         )
 
     monkeypatch.setattr(analyze_module._preprocessor, "run", fake_preprocessor_run)
+
     monkeypatch.setattr(
         analyze_module._shot_classifier_service,
         "run",
@@ -296,3 +299,10 @@ async def test_process_job_runs_shot_classifier_with_roi_entry_frame(
     assert job_status.shot_classifier.status == "done"
     assert job_status.shot_classifier.result is not None
     assert job_status.shot_classifier.result["predicted_shot"] == "cover"
+
+
+
+
+
+
+

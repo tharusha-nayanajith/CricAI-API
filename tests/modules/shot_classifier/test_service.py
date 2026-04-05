@@ -109,3 +109,47 @@ async def test_run_requires_roi_entry_or_bat_contact() -> None:
         match="Shot classifier requires a batter ROI entry frame or bat-contact fallback frame",
     ):
         await service.run(_artifacts(roi_entry_frame_idx=None), Path("input.mp4"))
+
+
+
+def test_resolve_model_path_uses_named_asset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir()
+    model_path = assets_dir / "model_weights.h5"
+    model_path.write_bytes(b"weights")
+
+    monkeypatch.delenv("SHOT_CLASSIFIER_MODEL_PATH", raising=False)
+    monkeypatch.setattr(shot_classifier_service, "ASSETS_DIR", assets_dir)
+    monkeypatch.setattr(shot_classifier_service, "MODEL_PATH", model_path)
+    monkeypatch.setattr(
+        shot_classifier_service,
+        "EXTERNAL_MODEL_PATH",
+        tmp_path / "external_model_weights.h5",
+    )
+
+    assert shot_classifier_service._resolve_model_path() == model_path
+
+
+
+def test_resolve_model_path_falls_back_to_any_h5_asset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir()
+    fallback_model = assets_dir / "custom_weights.h5"
+    fallback_model.write_bytes(b"weights")
+
+    monkeypatch.delenv("SHOT_CLASSIFIER_MODEL_PATH", raising=False)
+    monkeypatch.setattr(shot_classifier_service, "ASSETS_DIR", assets_dir)
+    monkeypatch.setattr(shot_classifier_service, "MODEL_PATH", assets_dir / "model_weights.h5")
+    monkeypatch.setattr(
+        shot_classifier_service,
+        "EXTERNAL_MODEL_PATH",
+        tmp_path / "external_model_weights.h5",
+    )
+
+    assert shot_classifier_service._resolve_model_path() == fallback_model
