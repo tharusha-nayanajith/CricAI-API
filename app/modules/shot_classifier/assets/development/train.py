@@ -24,7 +24,7 @@ sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(current_dir))
 
 from model_training.video_classifier_trainer import VideoClassifierTrainer
-from ..utils.config import SHOT_TYPES
+from ..utils.config import SHOT_TYPES, MODEL_FOLDER_PATH
 
 
 def main():
@@ -50,7 +50,7 @@ def main():
         '--model-dir',
         type=str,
         help='Model output directory',
-        default=None  # Will use default in trainer
+        default=MODEL_FOLDER_PATH  # Self-contained in assets
     )
     
     parser.add_argument(
