@@ -49,6 +49,7 @@ action-legality = [
     "trimesh>=4.4.9",
 ]
 shot-classifier = [
+    "google-generativeai>=0.3.0",
     "joblib>=1.4.2",
     "scikit-learn>=1.5.2",
 ]

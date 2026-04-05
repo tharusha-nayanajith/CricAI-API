@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import os
+import joblib
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import cv2
 import numpy as np
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers, models
+from tensorflow.keras.applications import EfficientNetB4
+from tensorflow.keras.applications.efficientnet import preprocess_input
 from loguru import logger
 
 from app.exceptions import FeatureError
@@ -15,27 +21,32 @@ from app.models.artifacts import VideoArtifacts
 
 from .models import ShotClassifierResult
 
+# Configuration - Mode 1 (EfficientNetB4 + GRU)
 FRAME_COUNT = 30
+MIN_FRAME_COUNT = 20
 FRAME_SIZE = (224, 224)
+FEATURE_DIM = 128
+
+# Shot type labels - matches trained model
 SHOT_CLASS_LABELS = [
-    "cover",
-    "defense",
-    "flick",
-    "hook",
-    "late_cut",
-    "lofted",
-    "pull",
-    "square_cut",
-    "straight",
-    "sweep",
+    "cut", "drive", "flick", "pull", "slog", "sweep", "misc"
 ]
+
+# Path resolution for trained models - self-contained in assets
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
-MODEL_PATH = ASSETS_DIR / "model_weights.h5"
+TRAINED_MODELS_DIR = ASSETS_DIR / "trained_models"
+VIDEO_CLASSIFIER_DIR = TRAINED_MODELS_DIR / "video_classifier"
+PROTOTYPES_PATH = TRAINED_MODELS_DIR / "prototypes" / "shot_prototypes.pkl"
+
+# Fallback external path if needed
 EXTERNAL_MODEL_PATH = (
     Path(__file__).resolve().parents[3].parent / "CricketShotClassification" / "model_weights.h5"
 )
 
+# Global caches
 _model: Any | None = None
+_feature_extractor: Any | None = None
+_prototypes: Optional[dict[str, dict]] = None
 
 
 class ShotClassifierService:
@@ -87,23 +98,46 @@ class ShotClassifierService:
     ) -> ShotClassifierResult:
         model = _load_model()
         frames = _read_clip_frames(video_path, start_frame_idx, FRAME_COUNT, FRAME_SIZE)
-        batch = np.expand_dims(frames, axis=0)
+        
+        # Normalize frames for EfficientNetB4 input
+        frames_normalized = preprocess_input(frames.astype(np.float32))
+        batch = np.expand_dims(frames_normalized, axis=0)
+        
         try:
             predictions = model.predict(batch, verbose=0)
         except Exception as exc:
+            logger.error("TensorFlow inference failed: {}", exc)
             raise FeatureError("TensorFlow inference failed for shot_classifier.") from exc
 
         scores = np.asarray(predictions, dtype=np.float32).reshape(-1)
         if scores.shape[0] != len(SHOT_CLASS_LABELS):
-            raise FeatureError("Shot classifier output size does not match configured labels.")
+            raise FeatureError(
+                f"Shot classifier output size mismatch: got {scores.shape[0]}, "
+                f"expected {len(SHOT_CLASS_LABELS)}"
+            )
 
         predicted_idx = int(np.argmax(scores))
         probabilities = {
             label: round(float(score), 6)
             for label, score in zip(SHOT_CLASS_LABELS, scores, strict=False)
         }
+        
+        # Extract 128-dim feature vector for mistake analysis
+        features = _extract_features(frames_normalized)
+        
+        # Run optional mistake analysis
+        predicted_shot = SHOT_CLASS_LABELS[predicted_idx]
+        analysis_result = _run_mistake_analysis(predicted_shot, features)
+        mistakes = analysis_result.get("mistakes", [])
+        
+        # Generate AI coaching feedback
+        coaching_feedback = _generate_ai_feedback(predicted_shot, float(scores[predicted_idx]), mistakes)
+        
+        # Build correction summary
+        correction_summary = f"Critical ({len([m for m in mistakes if m.get('severity') == 'critical'])})" if mistakes else "No issues detected"
+        
         return ShotClassifierResult(
-            predicted_shot=SHOT_CLASS_LABELS[predicted_idx],
+            predicted_shot=predicted_shot,
             confidence=float(scores[predicted_idx]),
             probabilities=probabilities,
             frames_used=FRAME_COUNT,
@@ -112,6 +146,9 @@ class ShotClassifierService:
             roi_entry_frame_index=artifacts.batter_roi_entry_frame_idx,
             trigger_source=trigger_source,
             video_url=video_url,
+            mistake_analysis=mistakes,
+            coaching_feedback=coaching_feedback,
+            correction_summary=correction_summary,
         )
 
 
@@ -134,6 +171,7 @@ def _read_clip_frames(
     frame_count: int,
     frame_size: tuple[int, int],
 ) -> np.ndarray:
+    """Extract frames from video starting at specific index."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         cap.release()
@@ -141,6 +179,12 @@ def _read_clip_frames(
 
     frames: list[np.ndarray] = []
     try:
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames < MIN_FRAME_COUNT:
+            raise FeatureError(
+                f"Video too short: {total_frames} frames (need minimum {MIN_FRAME_COUNT})"
+            )
+        
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame_idx)
         for _ in range(frame_count):
             ok, frame = cap.read()
@@ -176,47 +220,72 @@ def _format_frame(frame_bgr: np.ndarray, frame_size: tuple[int, int]) -> np.ndar
 
 
 def _load_model() -> Any:
+    """
+    Load EfficientNetB4 + GRU model.
+    
+    Architecture:
+    - EfficientNetB4 (backbone, non-trainable)
+    - TimeDistributed GlobalAveragePooling2D
+    - GRU(256, return_sequences=True, dropout=0.3)
+    - GRU(128, dropout=0.3)
+    - Dense(1024, relu) + Dropout(0.3)
+    - Dense(512, relu) + Dropout(0.2)
+    - Dense(num_shots, softmax)
+    """
     global _model
-    if _model is None:
-        model_path = _resolve_model_path()
-        try:
-            from tensorflow.keras import layers, models
-            from tensorflow.keras.applications import EfficientNetB0
-        except ImportError as exc:
-            raise FeatureError("tensorflow is required for the shot_classifier module.") from exc
-
-        logger.info("Loading shot_classifier TensorFlow model from {}", model_path)
-        try:
-            base_model = EfficientNetB0(
-                include_top=False,
-                weights=None,
-                input_shape=(FRAME_SIZE[0], FRAME_SIZE[1], 3),
-            )
-            base_model.trainable = False
-            model = models.Sequential(
-                [
-                    layers.TimeDistributed(
-                        base_model,
-                        input_shape=(None, FRAME_SIZE[0], FRAME_SIZE[1], 3),
-                    ),
-                    layers.TimeDistributed(layers.GlobalAveragePooling2D()),
-                    layers.GRU(256, return_sequences=True),
-                    layers.GRU(128),
-                    layers.Dense(1024, activation="relu"),
-                    layers.Dropout(0.5),
-                    layers.Dense(len(SHOT_CLASS_LABELS), activation="softmax"),
-                ]
-            )
-            model.load_weights(model_path)
-        except FeatureError:
-            raise
-        except Exception as exc:
-            raise FeatureError("Failed to load the shot_classifier TensorFlow model.") from exc
-        _model = model
+    if _model is not None:
+        return _model
+    
+    model_path = _resolve_model_path()
+    
+    try:
+        logger.info("Loading EfficientNetB4+GRU shot classifier model from {}", model_path)
+        
+        # Build EfficientNetB4 backbone
+        base_model = EfficientNetB4(
+            include_top=False,
+            weights=None,
+            input_shape=(FRAME_SIZE[0], FRAME_SIZE[1], 3),
+        )
+        base_model.trainable = False
+        
+        # Build full model with GRU layers
+        _model = models.Sequential([
+            layers.Input(shape=(FRAME_COUNT, FRAME_SIZE[0], FRAME_SIZE[1], 3)),
+            layers.TimeDistributed(base_model),
+            layers.TimeDistributed(layers.GlobalAveragePooling2D()),
+            layers.GRU(256, return_sequences=True, dropout=0.3, unroll=True),
+            layers.GRU(128, dropout=0.3, unroll=True),
+            layers.Dense(1024, activation='relu'),
+            layers.Dropout(0.3),
+            layers.Dense(512, activation='relu'),
+            layers.Dropout(0.2),
+            layers.Dense(len(SHOT_CLASS_LABELS), activation='softmax'),
+        ])
+        
+        # Load weights
+        _model.load_weights(str(model_path))
+        logger.info("EfficientNetB4+GRU model loaded successfully")
+        
+    except FileNotFoundError as exc:
+        logger.error("Model weights file not found: {}", exc)
+        raise FeatureError(f"Shot classifier model weights not found: {model_path}") from exc
+    except Exception as exc:
+        logger.error("Failed to load shot_classifier model: {}", exc)
+        raise FeatureError("Failed to load shot_classifier model") from exc
+    
     return _model
 
 
 def _resolve_model_path() -> Path:
+    """
+    Resolve model weights path with priority:
+    1. Environment variable SHOT_CLASSIFIER_MODEL_PATH
+    2. User's trained_models/video_classifier directory
+    3. Local assets directory
+    4. External fallback path
+    """
+    # Check environment variable first
     configured_path = os.getenv("SHOT_CLASSIFIER_MODEL_PATH")
     if configured_path:
         model_path = Path(configured_path)
@@ -225,26 +294,154 @@ def _resolve_model_path() -> Path:
             return model_path
         logger.warning("Configured model path does not exist: {}", model_path)
 
+    # Check video_classifier directory (priority order)
     model_paths_to_check = [
-        ASSETS_DIR / "trained_models" / "video_classifier" / "model.weights.h5",
-        ASSETS_DIR / "trained_models" / "video_classifier" / "best_model.weights.h5",
-        ASSETS_DIR / "trained_models" / "video_classifier" / "model_complete.keras",
-        MODEL_PATH,
-        *sorted(ASSETS_DIR.glob("*.h5")),
+        VIDEO_CLASSIFIER_DIR / "model.weights.h5",
+        VIDEO_CLASSIFIER_DIR / "best_model.weights.h5",
+        VIDEO_CLASSIFIER_DIR / "model_complete.keras",
+        ASSETS_DIR / "model_weights.h5",
         EXTERNAL_MODEL_PATH,
     ]
-
+    
     for path in model_paths_to_check:
         if path.exists():
             logger.info("Found shot_classifier model at: {}", path)
             return path
-
+    
+    # Error if nothing found
     logger.error(
         "Shot classifier model not found. Checked paths: {}. "
         "Set SHOT_CLASSIFIER_MODEL_PATH environment variable.",
-        model_paths_to_check,
+        model_paths_to_check
     )
     raise FeatureError(
-        "Missing shot_classifier model file. Set SHOT_CLASSIFIER_MODEL_PATH or place "
-        f"a model file at one of: {[str(p) for p in model_paths_to_check]}"
+        f"Missing shot_classifier model file. Set SHOT_CLASSIFIER_MODEL_PATH or place "
+        f"model_weights.h5 at one of: {[str(p) for p in model_paths_to_check]}"
     )
+
+def _extract_features(frames_normalized: np.ndarray) -> np.ndarray:
+    """
+    Extract 128-dim feature vector from GRU layer.
+    Features come from the second GRU(128) layer output.
+    """
+    global _feature_extractor
+    
+    if _feature_extractor is None:
+        model = _load_model()
+        
+        # Create feature extractor up to second GRU layer
+        feature_input = keras.Input(
+            shape=(FRAME_COUNT, FRAME_SIZE[0], FRAME_SIZE[1], 3)
+        )
+        feature_output = feature_input
+        
+        # Process through layers up to and including second GRU
+        for layer in model.layers[:5]:
+            feature_output = layer(feature_output)
+        
+        _feature_extractor = models.Model(feature_input, feature_output)
+    
+    batch = np.expand_dims(frames_normalized, axis=0)
+    features = _feature_extractor.predict(batch, verbose=0)[0]
+    return features.astype(np.float32)
+
+
+def get_prototypes() -> dict[str, dict]:
+    """
+    Load shot prototypes for mistake analysis.
+    Prototypes contain mean and std of 128-dim features for each shot type.
+    """
+    global _prototypes
+    
+    if _prototypes is not None:
+        return _prototypes
+    
+    if not PROTOTYPES_PATH.exists():
+        logger.warning("Prototypes not found at {}", PROTOTYPES_PATH)
+        return {}
+    
+    try:
+        _prototypes = joblib.load(PROTOTYPES_PATH)
+        logger.info("Loaded {} shot prototypes for mistake analysis", len(_prototypes))
+        return _prototypes
+    except Exception as exc:
+        logger.error("Failed to load prototypes: {}", exc)
+        return {}
+
+
+def _run_mistake_analysis(predicted_shot: str, features: np.ndarray) -> dict:
+    """
+    Run mistake analysis by comparing features against prototypes.
+    Returns visual feedback and mistake list.
+    """
+    try:
+        prototypes = get_prototypes()
+        if not prototypes:
+            return {}
+        
+        # Compare actual features to prototype for predicted shot
+        if predicted_shot not in prototypes:
+            return {}
+        
+        prototype_data = prototypes[predicted_shot]
+        prototype_mean = prototype_data.get('mean', np.zeros(FEATURE_DIM))
+        prototype_std = prototype_data.get('std', np.ones(FEATURE_DIM))
+        
+        # Calculate deviation from prototype
+        deviations = np.abs(features - prototype_mean) / (prototype_std + 1e-6)
+        
+        # Find top deviating components
+        top_indices = np.argsort(deviations)[-5:][::-1]
+        
+        mistakes = []
+        for idx in top_indices:
+            if deviations[idx] > 0.5:  # Significant deviation threshold
+                mistakes.append({
+                    "joint_id": "body_position",
+                    "body_part": "Body Position",
+                    "feature_name": f"embedding_{idx:03d}",
+                    "severity": "critical" if deviations[idx] > 1.0 else "warning",
+                    "actual_value": float(features[idx]),
+                    "expected_value": float(prototype_mean[idx]),
+                    "deviation": float(deviations[idx]),
+                    "explanation": f"Your movement embedding component {idx} was higher than expected for a {predicted_shot}.",
+                    "recommendation": f"Repeat {predicted_shot} drills to align with the learned prototype."
+                })
+        
+        return {
+            "mistakes": mistakes,
+            "prototype_samples": prototype_data.get('samples', 0),
+            "analysis_method": "efficientnetb4_gru_embedding"
+        }
+    except Exception as exc:
+        logger.warning("Mistake analysis failed: {}", exc)
+        return {}
+
+
+def _generate_ai_feedback(predicted_shot: str, confidence: float, mistakes: list) -> str:
+    """
+    Generate AI coaching feedback using Gemini.
+    Falls back to rule-based feedback if API unavailable.
+    """
+    try:
+        from .assets.utils.ai_feedback_generator import AIFeedbackGenerator
+        
+        generator = AIFeedbackGenerator()
+        if generator.client:
+            # Use Gemini for realistic feedback
+            feedback = generator.generate_feedback(
+                predicted_shot=predicted_shot,
+                confidence=confidence,
+                mistakes=mistakes
+            )
+            return feedback
+    except Exception as exc:
+        logger.warning("AI feedback generation failed: {}", exc)
+    
+    # Fallback to rule-based feedback
+    if confidence < 0.7:
+        return f"Low confidence prediction for {predicted_shot}. Review form and positioning."
+    elif mistakes:
+        return f"Significant deviation from correct {predicted_shot} form. Focus on improving the identified body positions."
+    else:
+        return f"Good {predicted_shot} execution. Continue practicing and refining technique."
