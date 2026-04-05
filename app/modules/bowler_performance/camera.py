@@ -11,6 +11,15 @@ from app.models.calibration import CalibrationData
 from app.modules.preprocessor.models import BallDetection
 
 STUMP_HALF_WIDTH_METRES = 0.0954
+WORLD_X_ABS_LIMIT_METRES = 5.0
+WORLD_Y_MIN_METRES = -0.1
+WORLD_Y_MAX_METRES = 4.0
+WORLD_Z_ABS_LIMIT_METRES = 40.0
+WORLD_STEP_MIN_THRESHOLD_METRES = 5.0
+WORLD_SEGMENT_MIN_THRESHOLD_METRES = 8.0
+WORLD_SANITY_Z_SPAN_THRESHOLD_METRES = 30.0
+WORLD_SANITY_Z_ABS_THRESHOLD_METRES = 40.0
+WORLD_SANITY_STEP_THRESHOLD_METRES = 6.5
 STUMP_HEIGHT_METRES = 0.711
 BATTING_STUMP_Z_METRES = -10.059
 BOWLING_STUMP_Z_METRES = 10.059
@@ -44,6 +53,12 @@ class ReconstructionSanity:
     implausible_depth_range: bool
     implausible_step_jump: bool
     trajectory_reliable: bool
+
+
+@dataclass(slots=True)
+class WorldPointFilterResult:
+    points: list[tuple[BallDetection, np.ndarray]]
+    removed_frame_indices: list[int]
 
 
 @dataclass(slots=True)
@@ -391,6 +406,84 @@ def pixels_to_world_points(
     return world_points
 
 
+def filter_world_point_outliers(
+    world_points: list[tuple[BallDetection, np.ndarray]],
+) -> WorldPointFilterResult:
+    if not world_points:
+        return WorldPointFilterResult(points=[], removed_frame_indices=[])
+
+    bounded_points: list[tuple[BallDetection, np.ndarray]] = []
+    removed_frames: set[int] = set()
+    for detection, point in world_points:
+        xyz = np.asarray(point, dtype=np.float64)
+        if not np.all(np.isfinite(xyz)):
+            removed_frames.add(int(detection.frame_idx))
+            continue
+        if (
+            abs(float(xyz[0])) > WORLD_X_ABS_LIMIT_METRES
+            or float(xyz[1]) < WORLD_Y_MIN_METRES
+            or float(xyz[1]) > WORLD_Y_MAX_METRES
+            or abs(float(xyz[2])) > WORLD_Z_ABS_LIMIT_METRES
+        ):
+            removed_frames.add(int(detection.frame_idx))
+            continue
+        bounded_points.append((detection, xyz))
+
+    if len(bounded_points) <= 2:
+        return WorldPointFilterResult(
+            points=bounded_points,
+            removed_frame_indices=sorted(removed_frames),
+        )
+
+    kept_points = bounded_points
+    while len(kept_points) >= 3:
+        point_values = np.asarray([point for _detection, point in kept_points], dtype=np.float64)
+        step_distances = np.linalg.norm(np.diff(point_values, axis=0), axis=1)
+        if step_distances.size == 0:
+            break
+        median_step = float(np.median(step_distances))
+        threshold = max(WORLD_STEP_MIN_THRESHOLD_METRES, median_step * 4.0)
+        spike_index: int | None = None
+        for index in range(1, len(kept_points) - 1):
+            prev_step = float(np.linalg.norm(point_values[index] - point_values[index - 1]))
+            next_step = float(np.linalg.norm(point_values[index + 1] - point_values[index]))
+            bridge_step = float(np.linalg.norm(point_values[index + 1] - point_values[index - 1]))
+            if prev_step > threshold and next_step > threshold and bridge_step <= threshold:
+                spike_index = index
+                break
+        if spike_index is None:
+            break
+        removed_frames.add(int(kept_points[spike_index][0].frame_idx))
+        kept_points = kept_points[:spike_index] + kept_points[spike_index + 1 :]
+
+    if len(kept_points) >= 2:
+        point_values = np.asarray([point for _detection, point in kept_points], dtype=np.float64)
+        step_distances = np.linalg.norm(np.diff(point_values, axis=0), axis=1)
+        if step_distances.size > 0:
+            median_step = float(np.median(step_distances))
+            threshold = max(WORLD_SEGMENT_MIN_THRESHOLD_METRES, median_step * 4.0)
+            segment_ranges: list[tuple[int, int]] = []
+            start_index = 0
+            for index, step_distance in enumerate(step_distances, start=1):
+                if float(step_distance) > threshold:
+                    segment_ranges.append((start_index, index))
+                    start_index = index
+            segment_ranges.append((start_index, len(kept_points)))
+            best_start, best_end = max(
+                segment_ranges,
+                key=lambda item: (item[1] - item[0], -item[0]),
+            )
+            if best_start != 0 or best_end != len(kept_points):
+                for detection, _point in kept_points[:best_start] + kept_points[best_end:]:
+                    removed_frames.add(int(detection.frame_idx))
+                kept_points = kept_points[best_start:best_end]
+
+    return WorldPointFilterResult(
+        points=kept_points,
+        removed_frame_indices=sorted(removed_frames),
+    )
+
+
 def assess_world_points(
     world_points: list[tuple[BallDetection, np.ndarray]],
 ) -> ReconstructionSanity:
@@ -420,14 +513,22 @@ def assess_world_points(
         median_step_distance = None
 
     world_y_abs_max = float(np.max(np.abs(world_xyz[:, 1])))
-    world_z_min = float(np.min(world_xyz[:, 2]))
-    world_z_max = float(np.max(world_xyz[:, 2]))
+    world_z_values = world_xyz[:, 2]
+    world_z_min = float(np.min(world_z_values))
+    world_z_max = float(np.max(world_z_values))
     world_z_span = world_z_max - world_z_min
+    world_z_p5 = float(np.percentile(world_z_values, 5))
+    world_z_p95 = float(np.percentile(world_z_values, 95))
+    world_z_span_robust = world_z_p95 - world_z_p5
 
     all_points_on_ground = world_y_abs_max < 1e-6
-    implausible_depth_range = world_z_span > 50.0 or abs(world_z_min) > 50.0
+    implausible_depth_range = (
+        world_z_span_robust > WORLD_SANITY_Z_SPAN_THRESHOLD_METRES
+        or abs(world_z_p5) > WORLD_SANITY_Z_ABS_THRESHOLD_METRES
+    )
     implausible_step_jump = (
-        max_step_distance is not None and max_step_distance > 10.0
+        max_step_distance is not None
+        and max_step_distance > WORLD_SANITY_STEP_THRESHOLD_METRES
     )
     trajectory_reliable = not (
         all_points_on_ground or implausible_depth_range or implausible_step_jump

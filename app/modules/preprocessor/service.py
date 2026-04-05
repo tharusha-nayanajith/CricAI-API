@@ -135,9 +135,11 @@ class VideoPreprocessor:
                 release_frame=ctx.release_point.annotated_frame,
                 ball_path=[],
                 bat_contact_frame=None,
+                standardized_video_path=std_path,
                 release_point=ctx.release_point,
                 batter_mode=ctx.batter_mode,
                 bat_contact=None,
+                ball_candidates_by_frame=[],
             )
 
         ball_tracker = get_ball_tracker()
@@ -153,6 +155,7 @@ class VideoPreprocessor:
             ),
         )
         ctx.batter_roi_entry_frame_idx = getattr(ball_tracker, "last_roi_entry_frame_idx", None)
+        ball_candidates_by_frame = getattr(ball_tracker, "last_frame_candidates", [])
         if len(raw_path) < 3:
             raise PreprocessingError(f"Ball path too short: {len(raw_path)} detections")
         if ctx.batter_mode == BatterMode.PRESENT:
@@ -180,10 +183,12 @@ class VideoPreprocessor:
             bat_contact_frame=(
                 ctx.bat_contact.annotated_frame if ctx.bat_contact is not None else None
             ),
+            standardized_video_path=std_path,
             release_point=ctx.release_point,
             batter_mode=ctx.batter_mode,
             batter_roi_entry_frame_idx=ctx.batter_roi_entry_frame_idx,
             bat_contact=ctx.bat_contact,
+            ball_candidates_by_frame=ball_candidates_by_frame,
         )
 
     async def _detect_release(self, ctx: DeliveryContext) -> ReleasePoint:

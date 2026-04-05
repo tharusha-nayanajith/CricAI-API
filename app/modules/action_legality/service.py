@@ -64,7 +64,10 @@ class ActionLegalityService:
         except FeatureError:
             raise
         except Exception as exc:
-            raise FeatureError("Bowling action legality analysis failed unexpectedly") from exc
+            logger.exception("Unexpected action_legality failure")
+            raise FeatureError(
+                f"Bowling action legality analysis failed unexpectedly: {exc}"
+            ) from exc
 
         logger.info(
             "Completed action_legality analysis verdict={} illegal_probability={:.3f}",
@@ -295,7 +298,19 @@ def _get_pose_landmarker():
                 running_mode=RunningMode.IMAGE,
                 num_poses=1,
             )
-            _pose_landmarker = PoseLandmarker.create_from_options(options)
+            try:
+                _pose_landmarker = PoseLandmarker.create_from_options(options)
+            except OSError as cpu_exc:
+                raise FeatureError(
+                    "MediaPipe PoseLandmarker could not be initialized because a required "
+                    "system library is missing: "
+                    f"{cpu_exc}. Install the OpenGL runtime package that provides "
+                    "libGLESv2.so.2 in the Linux environment."
+                ) from cpu_exc
+            except Exception as cpu_exc:
+                raise FeatureError(
+                    f"MediaPipe PoseLandmarker CPU fallback failed: {cpu_exc}"
+                ) from cpu_exc
 
         _pose_landmarker_initialized = True
         _register_landmarker_cleanup()

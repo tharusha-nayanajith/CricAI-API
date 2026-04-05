@@ -13,6 +13,14 @@ class Settings(BaseSettings):
     )
     s3_bucket: str = Field(default="crickai-results", validation_alias="S3_BUCKET")
     aws_region: str = Field(default="us-east-1", validation_alias="AWS_REGION")
+    s3_playback_prefix: str = Field(
+        default="deliveries",
+        validation_alias="S3_PLAYBACK_PREFIX",
+    )
+    s3_presign_ttl_seconds: int = Field(
+        default=3600,
+        validation_alias="S3_PRESIGN_TTL_SECONDS",
+    )
     jwt_secret: str = Field(default="change-me", validation_alias="JWT_SECRET")
     jwt_algorithm: str = Field(default="HS256", validation_alias="JWT_ALGORITHM")
     revenuecat_webhook_secret: str = Field(

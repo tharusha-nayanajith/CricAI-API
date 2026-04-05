@@ -226,9 +226,20 @@ def _resolve_model_path() -> Path:
 
     if MODEL_PATH.exists():
         return MODEL_PATH
+
+    asset_candidates = sorted(ASSETS_DIR.glob("*.h5"))
+    if asset_candidates:
+        logger.info(
+            "Using shot_classifier model asset {} from {}",
+            asset_candidates[0].name,
+            ASSETS_DIR,
+        )
+        return asset_candidates[0]
+
     if EXTERNAL_MODEL_PATH.exists():
         return EXTERNAL_MODEL_PATH
     raise FeatureError(
         "Missing shot_classifier model file. Set SHOT_CLASSIFIER_MODEL_PATH or place "
-        f"model_weights.h5 at {MODEL_PATH} or {EXTERNAL_MODEL_PATH}."
+        f"model_weights.h5 or another .h5 model in {ASSETS_DIR}, or place model_weights.h5 "
+        f"at {EXTERNAL_MODEL_PATH}."
     )

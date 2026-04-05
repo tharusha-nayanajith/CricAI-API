@@ -38,7 +38,8 @@ class ShotSimilarityService:
         except FeatureError:
             raise
         except Exception as exc:
-            raise FeatureError("Shot similarity analysis failed unexpectedly") from exc
+            logger.exception("Unexpected shot_similarity failure")
+            raise FeatureError(f"Shot similarity analysis failed unexpectedly: {exc}") from exc
 
         logger.info(
             "Completed shot_similarity analysis matched_player={} shot_type={} similarity={:.2f}",

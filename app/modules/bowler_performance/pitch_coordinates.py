@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
+from loguru import logger
 
 from app.models.calibration import CalibrationData
 from app.modules.preprocessor.models import BallDetection
@@ -151,7 +152,123 @@ def _measured_pitch_length(
 
 
 def _lateral_axis_sign(calibration: CalibrationData) -> float:
-    # FullTrack calibrations can arrive with opposite in-plane camera rotation
-    # signs for visually mirrored videos. Normalize pitch-map x so all videos
-    # share one lateral convention.
-    return -1.0 if calibration.rotation[2] > 0.0 else 1.0
+    batting_debug = _channel_order_debug(
+        calibration,
+        off_channels=(0, 1),
+        leg_channels=(4, 5),
+    )
+    batting_sign = batting_debug["sign"]
+    if batting_sign is not None:
+        logger.info(
+            "Pitch-frame sign debug source=batting rotation_z={} "
+            "off_channels={} leg_channels={} off_x={} leg_x={} delta={} sign={}",
+            float(calibration.rotation[2]),
+            batting_debug["off_channels"],
+            batting_debug["leg_channels"],
+            batting_debug["off_x_values"],
+            batting_debug["leg_x_values"],
+            batting_debug["delta"],
+            batting_sign,
+        )
+        return batting_sign
+
+    bowling_debug = _channel_order_debug(
+        calibration,
+        off_channels=(6, 7),
+        leg_channels=(10, 11),
+    )
+    bowling_sign = bowling_debug["sign"]
+    if bowling_sign is not None:
+        logger.info(
+            "Pitch-frame sign debug source=bowling rotation_z={} "
+            "off_channels={} leg_channels={} off_x={} leg_x={} delta={} sign={}",
+            float(calibration.rotation[2]),
+            bowling_debug["off_channels"],
+            bowling_debug["leg_channels"],
+            bowling_debug["off_x_values"],
+            bowling_debug["leg_x_values"],
+            bowling_debug["delta"],
+            bowling_sign,
+        )
+        return bowling_sign
+
+    logger.info(
+        "Pitch-frame sign debug source=default rotation_z={} "
+        "batting_debug={} bowling_debug={} sign=1.0",
+        float(calibration.rotation[2]),
+        batting_debug,
+        bowling_debug,
+    )
+    return 1.0
+
+
+def _signed_channel_order(
+    calibration: CalibrationData,
+    *,
+    off_channels: tuple[int, ...],
+    leg_channels: tuple[int, ...],
+) -> float | None:
+    debug = _channel_order_debug(
+        calibration,
+        off_channels=off_channels,
+        leg_channels=leg_channels,
+    )
+    sign = debug["sign"]
+    return float(sign) if sign is not None else None
+
+
+def _channel_order_debug(
+    calibration: CalibrationData,
+    *,
+    off_channels: tuple[int, ...],
+    leg_channels: tuple[int, ...],
+) -> dict[str, object]:
+    off_x_values = _channel_x_values(calibration, off_channels)
+    leg_x_values = _channel_x_values(calibration, leg_channels)
+    off_mean = float(np.mean(np.asarray(off_x_values, dtype=np.float64))) if off_x_values else None
+    leg_mean = float(np.mean(np.asarray(leg_x_values, dtype=np.float64))) if leg_x_values else None
+    delta = (leg_mean - off_mean) if off_mean is not None and leg_mean is not None else None
+    sign = None
+    if delta is not None and abs(delta) >= 1e-6:
+        sign = 1.0 if delta > 0.0 else -1.0
+    return {
+        "off_channels": list(off_channels),
+        "leg_channels": list(leg_channels),
+        "off_x_values": off_x_values,
+        "leg_x_values": leg_x_values,
+        "off_mean": off_mean,
+        "leg_mean": leg_mean,
+        "delta": delta,
+        "sign": sign,
+    }
+
+
+def _mean_channel_x(
+    calibration: CalibrationData,
+    channels: tuple[int, ...],
+) -> float | None:
+    x_values = _channel_x_values(calibration, channels)
+    if not x_values:
+        return None
+    return float(np.mean(np.asarray(x_values, dtype=np.float64)))
+
+
+def _channel_x_values(
+    calibration: CalibrationData,
+    channels: tuple[int, ...],
+) -> list[float]:
+    best_by_channel: dict[int, tuple[float, float]] = {}
+    for keypoint in calibration.keypoints:
+        channel_index = keypoint.channel_index
+        if channel_index not in channels:
+            continue
+        candidate = (float(keypoint.score), float(keypoint.x))
+        previous = best_by_channel.get(channel_index)
+        if previous is None or candidate[0] > previous[0]:
+            best_by_channel[channel_index] = candidate
+
+    return [
+        best_by_channel[channel_index][1]
+        for channel_index in channels
+        if channel_index in best_by_channel
+    ]
