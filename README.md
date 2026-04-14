@@ -120,6 +120,13 @@ uv run ruff check .
 uv run mypy app/
 ```
 
+Deployment help:
+
+- Google Compute Engine guide: [deploy/compute-engine.md](/home/tharu/projects/Final_CrickAI_Backend/deploy/compute-engine.md)
+- `systemd` unit: [deploy/crickai-api.service](/home/tharu/projects/Final_CrickAI_Backend/deploy/crickai-api.service)
+- `nginx` site config: [deploy/nginx-crickai.conf](/home/tharu/projects/Final_CrickAI_Backend/deploy/nginx-crickai.conf)
+- production env example: [deploy/.env.gce.example](/home/tharu/projects/Final_CrickAI_Backend/deploy/.env.gce.example)
+
 Relevant environment variables:
 
 - `REDIS_URL`
