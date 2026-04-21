@@ -47,11 +47,9 @@ RANDOM_FOREST_PARAMS = {
 
 # File paths
 DATASET_PATH = "C:\\Users\\User\\Downloads\\Cricket-Shots" 
-BALL_DATASET_PATH = "C:\\Users\\User\\Downloads\\ball_detection"
-MODEL_PATH = "features/SHOT_CLASSIFICATION_SYSTEM/trained_models/rf_model.pkl"
-SCALER_PATH = "features/SHOT_CLASSIFICATION_SYSTEM/trained_models/scaler.pkl"
 
-MODEL_FOLDER_PATH = "features/SHOT_CLASSIFICATION_SYSTEM/trained_models"
+# Mode 1 trained models - self-contained in assets directory
+MODEL_FOLDER_PATH = "app/modules/shot_classifier/assets/trained_models"
 SUPPORTED_VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv')
 
 def supported_extensions_str() -> str:

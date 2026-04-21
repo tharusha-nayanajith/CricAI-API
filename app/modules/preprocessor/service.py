@@ -2,6 +2,7 @@ import asyncio
 import os
 import shutil
 import subprocess
+import time
 from functools import partial
 from pathlib import Path
 
@@ -113,24 +114,46 @@ class VideoPreprocessor:
     ) -> VideoArtifacts:
         self._release_frame = None
         self._release_point = None
-        std_path = await self.standardize_video(video_path)
-        batter_detector = get_batter_detector()
         loop = asyncio.get_event_loop()
+        timings_ms: dict[str, float] = {}
+
+        started = time.perf_counter()
+        std_path = await self.standardize_video(video_path)
+        timings_ms["standardize"] = _elapsed_ms(started)
+
+        started = time.perf_counter()
+        batter_detector = get_batter_detector()
         batter_mode, batter_roi = await loop.run_in_executor(
             None,
             partial(batter_detector.detect, std_path, calibration),
         )
+        timings_ms["batter_detect"] = _elapsed_ms(started)
+
+        started = time.perf_counter()
+        fps = await loop.run_in_executor(None, partial(self._read_fps, std_path))
+        timings_ms["fps_read"] = _elapsed_ms(started)
 
         ctx = DeliveryContext(
             standardized_video_path=std_path,
             batter_mode=batter_mode,
             batter_roi=batter_roi,
-            fps=await loop.run_in_executor(None, partial(self._read_fps, std_path)),
+            fps=fps,
         )
+
+        started = time.perf_counter()
         ctx.release_point = await self._detect_release(ctx)
+        timings_ms["release_detect"] = _elapsed_ms(started)
         if not require_ball_path:
             self._release_frame = ctx.release_point.annotated_frame
             self._release_point = ctx.release_point
+            logger.info(
+                "preprocessor timings_ms standardize={:.1f} batter_detect={:.1f} fps_read={:.1f} release_detect={:.1f} total={:.1f}",
+                timings_ms["standardize"],
+                timings_ms["batter_detect"],
+                timings_ms["fps_read"],
+                timings_ms["release_detect"],
+                sum(timings_ms.values()),
+            )
             return VideoArtifacts(
                 release_frame=ctx.release_point.annotated_frame,
                 ball_path=[],
@@ -142,6 +165,7 @@ class VideoPreprocessor:
                 ball_candidates_by_frame=[],
             )
 
+        started = time.perf_counter()
         ball_tracker = get_ball_tracker()
         raw_path = await loop.run_in_executor(
             None,
@@ -154,6 +178,7 @@ class VideoPreprocessor:
                 ctx.batter_roi,
             ),
         )
+        timings_ms["ball_track"] = _elapsed_ms(started)
         ctx.batter_roi_entry_frame_idx = getattr(ball_tracker, "last_roi_entry_frame_idx", None)
         ball_candidates_by_frame = getattr(ball_tracker, "last_frame_candidates", [])
         if len(raw_path) < 3:
@@ -161,6 +186,7 @@ class VideoPreprocessor:
         if ctx.batter_mode == BatterMode.PRESENT:
             if ctx.batter_roi is None:
                 raise PreprocessingError("Batter ROI is required when batter mode is present")
+            started = time.perf_counter()
             bat_contact_detector = get_bat_contact_detector()
             ctx.bat_contact = await loop.run_in_executor(
                 None,
@@ -172,10 +198,23 @@ class VideoPreprocessor:
                     raw_path,
                 ),
             )
+            timings_ms["bat_contact"] = _elapsed_ms(started)
         else:
             ctx.bat_contact = None
+            timings_ms["bat_contact"] = 0.0
         self._release_frame = ctx.release_point.annotated_frame
         self._release_point = ctx.release_point
+
+        logger.info(
+            "preprocessor timings_ms standardize={:.1f} batter_detect={:.1f} fps_read={:.1f} release_detect={:.1f} ball_track={:.1f} bat_contact={:.1f} total={:.1f}",
+            timings_ms["standardize"],
+            timings_ms["batter_detect"],
+            timings_ms["fps_read"],
+            timings_ms["release_detect"],
+            timings_ms["ball_track"],
+            timings_ms["bat_contact"],
+            sum(timings_ms.values()),
+        )
 
         return VideoArtifacts(
             release_frame=ctx.release_point.annotated_frame,
@@ -288,3 +327,7 @@ class VideoPreprocessor:
 
 class PreprocessorService(VideoPreprocessor):
     """Backward-compatible alias for preprocessor service wiring."""
+
+
+def _elapsed_ms(start_time: float) -> float:
+    return (time.perf_counter() - start_time) * 1000.0

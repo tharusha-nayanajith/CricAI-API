@@ -275,42 +275,58 @@ def _get_pose_landmarker():
         if _pose_landmarker_initialized:
             raise FeatureError("PoseLandmarker initialization failed earlier.")
 
+        delegate_name = os.getenv("MEDIAPIPE_POSE_DELEGATE", "cpu").strip().lower()
+        delegate = BaseOptions.Delegate.GPU if delegate_name == "gpu" else BaseOptions.Delegate.CPU
+        if delegate is BaseOptions.Delegate.CPU:
+            logger.info("Initializing PoseLandmarker with CPU delegate")
         try:
             options = PoseLandmarkerOptions(
                 base_options=BaseOptions(
                     model_asset_path=str(model_file),
-                    delegate=BaseOptions.Delegate.GPU,
+                    delegate=delegate,
                 ),
                 running_mode=RunningMode.IMAGE,
                 num_poses=1,
             )
             _pose_landmarker = PoseLandmarker.create_from_options(options)
+        except OSError as cpu_exc:
+            raise FeatureError(
+                "MediaPipe PoseLandmarker could not be initialized because a required "
+                "system library is missing: "
+                f"{cpu_exc}. Install the OpenGL runtime package that provides "
+                "libGLESv2.so.2 in the Linux environment."
+            ) from cpu_exc
         except Exception as exc:
-            logger.warning(
-                "PoseLandmarker GPU delegate failed ({}). Falling back to CPU.",
-                exc,
-            )
-            options = PoseLandmarkerOptions(
-                base_options=BaseOptions(
-                    model_asset_path=str(model_file),
-                    delegate=BaseOptions.Delegate.CPU,
-                ),
-                running_mode=RunningMode.IMAGE,
-                num_poses=1,
-            )
-            try:
-                _pose_landmarker = PoseLandmarker.create_from_options(options)
-            except OSError as cpu_exc:
+            if delegate is BaseOptions.Delegate.GPU:
+                logger.warning(
+                    "PoseLandmarker GPU delegate failed ({}). Falling back to CPU.",
+                    exc,
+                )
+                options = PoseLandmarkerOptions(
+                    base_options=BaseOptions(
+                        model_asset_path=str(model_file),
+                        delegate=BaseOptions.Delegate.CPU,
+                    ),
+                    running_mode=RunningMode.IMAGE,
+                    num_poses=1,
+                )
+                try:
+                    _pose_landmarker = PoseLandmarker.create_from_options(options)
+                except OSError as cpu_exc:
+                    raise FeatureError(
+                        "MediaPipe PoseLandmarker could not be initialized because a required "
+                        "system library is missing: "
+                        f"{cpu_exc}. Install the OpenGL runtime package that provides "
+                        "libGLESv2.so.2 in the Linux environment."
+                    ) from cpu_exc
+                except Exception as cpu_exc:
+                    raise FeatureError(
+                        f"MediaPipe PoseLandmarker CPU fallback failed: {cpu_exc}"
+                    ) from cpu_exc
+            else:
                 raise FeatureError(
-                    "MediaPipe PoseLandmarker could not be initialized because a required "
-                    "system library is missing: "
-                    f"{cpu_exc}. Install the OpenGL runtime package that provides "
-                    "libGLESv2.so.2 in the Linux environment."
-                ) from cpu_exc
-            except Exception as cpu_exc:
-                raise FeatureError(
-                    f"MediaPipe PoseLandmarker CPU fallback failed: {cpu_exc}"
-                ) from cpu_exc
+                    f"MediaPipe PoseLandmarker CPU initialization failed: {exc}"
+                ) from exc
 
         _pose_landmarker_initialized = True
         _register_landmarker_cleanup()
