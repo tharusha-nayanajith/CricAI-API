@@ -19,7 +19,8 @@ fails with a `FeatureError`.
 3. Extract pose landmarks from that frame.
 4. Compare the user pose only against references that belong to the classified
    shot family.
-5. Return the best matched player, similarity score, and coaching feedback.
+5. Generate an AI coaching summary with Vertex AI using the similarity match and heuristic notes.
+6. Return the best matched player, similarity score, and coaching feedback.
 
 ## Reference library
 
@@ -46,5 +47,6 @@ consumes the existing `bat_contact_frame`.
 - `keypoints_detected`
 - `confidence`
 - `feedback`
+- `ai_feedback`
 - `compared_frame`
 - `video_url`

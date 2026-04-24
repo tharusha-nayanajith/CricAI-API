@@ -29,6 +29,7 @@ router = APIRouter(tags=["analyze"])
 VIDEO_FILE = File(...)
 VIDEOS_FILE = File(...)
 CALIBRATION_FORM = Form(...)
+SESSION_CALIBRATION_FORM = Form(...)
 FEATURES_FORM = Form("bowler_performance,action_legality,shot_classifier,shot_similarity")
 SESSION_FEATURES = ["bowler_performance"]
 
@@ -65,6 +66,27 @@ def _parse_calibration(calibration: str) -> tuple[dict[str, object], Calibration
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
     return calibration_payload, calibration_data
+
+
+def _parse_session_calibrations(
+    calibrations: list[str],
+    clip_count: int,
+) -> list[tuple[dict[str, object], CalibrationData]]:
+    if not calibrations:
+        raise HTTPException(status_code=422, detail="At least one calibration is required.")
+
+    parsed = [_parse_calibration(calibration) for calibration in calibrations]
+    if len(parsed) == 1:
+        return parsed * clip_count
+    if len(parsed) != clip_count:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Session calibration count must be either 1 shared calibration or exactly one "
+                "calibration per uploaded video."
+            ),
+        )
+    return parsed
 
 
 def _parse_features(features: str) -> list[str]:
@@ -130,13 +152,13 @@ async def analyze_session(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     *,
     videos: list[UploadFile] = VIDEOS_FILE,
-    calibration: str = CALIBRATION_FORM,
+    calibration: list[str] = SESSION_CALIBRATION_FORM,
     features: str = FEATURES_FORM,
 ) -> SessionCreateResponse:
     if not videos:
         raise HTTPException(status_code=422, detail="At least one video is required.")
 
-    calibration_payload, calibration_data = _parse_calibration(calibration)
+    session_calibrations = _parse_session_calibrations(calibration, len(videos))
     _ = features
     selected_features = SESSION_FEATURES
     await _enforce_quota(session, current_user.id, len(videos))
@@ -149,7 +171,13 @@ async def analyze_session(
     session_id = str(uuid4())
     delivery_refs: list[SessionDeliveryRef] = []
     try:
-        for video, source_video_path in zip(videos, source_video_paths, strict=True):
+        for video, source_video_path, calibration_entry in zip(
+            videos,
+            source_video_paths,
+            session_calibrations,
+            strict=True,
+        ):
+            calibration_payload, calibration_data = calibration_entry
             job_id = str(uuid4())
             filename = video.filename or "upload.mp4"
             await store_calibration(job_id, calibration_data)

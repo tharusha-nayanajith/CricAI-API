@@ -38,6 +38,10 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="SHOT_SIMILARITY_REFERENCE_DIR",
     )
+    shot_similarity_reference_player_name: str | None = Field(
+        default=None,
+        validation_alias="SHOT_SIMILARITY_REFERENCE_PLAYER_NAME",
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

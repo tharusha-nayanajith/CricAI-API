@@ -50,6 +50,7 @@ async def test_run_returns_best_match(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.matched_player == "Virat Kohli"
     assert result.shot_type == "drive"
     assert result.keypoints_detected == 33
+    assert result.ai_feedback
     assert result.compared_frame == "bat_contact_frame"
 
 
@@ -94,6 +95,7 @@ async def test_run_filters_by_classified_shot_type(monkeypatch: pytest.MonkeyPat
 
     assert result.matched_player == "Virat Kohli"
     assert result.shot_type == "cut"
+    assert result.ai_feedback
 
 
 @pytest.mark.asyncio

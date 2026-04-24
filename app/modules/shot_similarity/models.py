@@ -21,5 +21,6 @@ class ShotSimilarityResult(BaseModel):
     keypoints_detected: int
     confidence: float
     feedback: list[str]
+    ai_feedback: str | None = None
     compared_frame: str
     video_url: str | None = None
