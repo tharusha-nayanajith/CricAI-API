@@ -6,6 +6,7 @@ library of golden shots.
 ## Inputs
 
 - `VideoArtifacts.bat_contact_frame`
+- `shot_classifier.predicted_shot` to constrain the comparison set
 - optional `video_url` for result metadata
 
 If the shared preprocessor cannot produce `bat_contact_frame`, this module
@@ -14,19 +15,22 @@ fails with a `FeatureError`.
 ## Runtime flow
 
 1. Reuse the shared preprocessor's bat-contact frame.
-2. Extract pose landmarks from that frame.
-3. Normalize the user pose and compare it against the local reference library.
-4. Return the best matched player, shot type, similarity score, and coaching
-   feedback.
+2. Reuse the shot classifier output as the canonical shot family.
+3. Extract pose landmarks from that frame.
+4. Compare the user pose only against references that belong to the classified
+   shot family.
+5. Return the best matched player, similarity score, and coaching feedback.
 
 ## Reference library
 
-Reference shots live in:
+Reference shots can come from either:
 
-- `app/modules/shot_similarity/assets/golden_frames.json`
+- `SHOT_SIMILARITY_REFERENCE_DIR` for external multi-frame JSON references
+- `app/modules/shot_similarity/assets/golden_frames.json` for legacy single-frame references
 
-The checked-in file is intentionally empty until real player reference poses
-are added.
+External JSON files are expected to contain a top-level `frames` array where
+ each frame is a list of pose landmarks with `x`, `y`, `z`, and optional
+ `visibility`.
 
 ## Important design note
 

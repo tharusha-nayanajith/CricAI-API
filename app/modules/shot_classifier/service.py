@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import os
 import time
 from pathlib import Path
@@ -15,6 +14,7 @@ from tensorflow.keras import layers, models
 from tensorflow.keras.applications import EfficientNetB4
 from tensorflow.keras.applications.efficientnet import preprocess_input
 
+from app.ai.google import get_google_genai_status
 from app.exceptions import FeatureError
 from app.models.artifacts import VideoArtifacts
 
@@ -130,6 +130,12 @@ class ShotClassifierService:
             for label, score in zip(SHOT_CLASS_LABELS, scores, strict=False)
         }
         predicted_shot = SHOT_CLASS_LABELS[predicted_idx]
+        logger.info(
+            "shot_classifier prediction predicted_shot={} confidence={:.3f} probabilities={}",
+            predicted_shot,
+            float(scores[predicted_idx]),
+            probabilities,
+        )
 
         t0 = time.perf_counter()
         logger.info("shot_classifier step=feature_extract:start video_url={}", video_url)
@@ -143,6 +149,12 @@ class ShotClassifierService:
         timings_ms["mistake_analysis"] = _elapsed_ms(t0)
         logger.info("shot_classifier step=mistake_analysis:done took_ms={:.1f} video_url={}", timings_ms["mistake_analysis"], video_url)
         mistakes = analysis_result.get("mistakes", [])
+        logger.info(
+            "shot_classifier mistake_analysis result predicted_shot={} mistakes_count={} analysis_result={}",
+            predicted_shot,
+            len(mistakes),
+            analysis_result,
+        )
 
         t0 = time.perf_counter()
         logger.info("shot_classifier step=feedback:start video_url={}", video_url)
@@ -164,7 +176,7 @@ class ShotClassifierService:
             timings_ms["feedback"],
         )
 
-        return ShotClassifierResult(
+        result = ShotClassifierResult(
             predicted_shot=predicted_shot,
             confidence=float(scores[predicted_idx]),
             probabilities=probabilities,
@@ -178,6 +190,15 @@ class ShotClassifierService:
             coaching_feedback=coaching_feedback,
             correction_summary=correction_summary,
         )
+        logger.info(
+            "shot_classifier output predicted_shot={} confidence={:.3f} mistakes_count={} correction_summary={} coaching_feedback={}",
+            result.predicted_shot,
+            result.confidence,
+            len(result.mistake_analysis or []),
+            result.correction_summary,
+            result.coaching_feedback,
+        )
+        return result
 
 
 def _elapsed_ms(start_time: float) -> float:
@@ -206,8 +227,17 @@ def _resolve_start_frame(
     if artifacts.bat_contact is not None:
         fallback_start = max(0, artifacts.bat_contact.contact_frame_idx - FRAME_COUNT + 1)
         return fallback_start, "bat_contact_fallback"
+    if artifacts.ball_path:
+        last_ball_frame_idx = int(artifacts.ball_path[-1].frame_idx)
+        fallback_start = max(0, last_ball_frame_idx - FRAME_COUNT + 1)
+        logger.info(
+            "shot_classifier start fallback trigger=ball_path_end last_ball_frame_idx={} start_frame_idx={}",
+            last_ball_frame_idx,
+            fallback_start,
+        )
+        return fallback_start, "ball_path_end_fallback"
     raise FeatureError(
-        "Shot classifier requires a batter ROI entry frame or bat-contact fallback frame."
+        "Shot classifier requires a batter ROI entry frame, bat-contact fallback frame, or ball-path fallback frame."
     )
 
 
@@ -366,16 +396,17 @@ def _extract_features(frames_normalized: np.ndarray) -> np.ndarray:
 def get_prototypes() -> dict[str, dict[str, Any]]:
     global _prototypes
     if _prototypes is not None:
+        logger.info("shot_classifier prototypes cache_hit count={}", len(_prototypes))
         return _prototypes
 
     if not PROTOTYPES_PATH.exists():
-        logger.warning("Prototypes not found at {}", PROTOTYPES_PATH)
+        logger.warning("shot_classifier prototypes missing path={}", PROTOTYPES_PATH)
         return {}
 
     try:
         raw_prototypes = joblib.load(PROTOTYPES_PATH)
     except Exception as exc:
-        logger.error("Failed to load prototypes: {}", exc)
+        logger.error("shot_classifier prototypes load_failed error={}", exc)
         return {}
 
     normalized: dict[str, dict[str, Any]] = {}
@@ -405,7 +436,7 @@ def get_prototypes() -> dict[str, dict[str, Any]]:
         }
 
     _prototypes = normalized
-    logger.info("Loaded {} shot prototypes for mistake analysis", len(_prototypes))
+    logger.info("shot_classifier prototypes loaded count={} labels={}", len(_prototypes), sorted(_prototypes.keys()))
     return _prototypes
 
 
@@ -413,13 +444,25 @@ def _run_mistake_analysis(predicted_shot: str, features: np.ndarray) -> dict[str
     try:
         prototypes = get_prototypes()
         if not prototypes:
+            logger.info("shot_classifier mistake_analysis skipped reason=no_prototypes predicted_shot={}", predicted_shot)
             return {}
         if predicted_shot not in prototypes:
+            logger.info(
+                "shot_classifier mistake_analysis skipped reason=missing_prototype predicted_shot={} available_labels={}",
+                predicted_shot,
+                sorted(prototypes.keys()),
+            )
             return {}
 
         prototype_data = prototypes[predicted_shot]
         prototype_mean = prototype_data.get("mean", np.zeros(FEATURE_DIM, dtype=np.float32))
         prototype_std = prototype_data.get("std", np.ones(FEATURE_DIM, dtype=np.float32))
+        logger.info(
+            "shot_classifier mistake_analysis prototype_ready predicted_shot={} samples={} feature_dim={}",
+            predicted_shot,
+            int(prototype_data.get("samples", 0) or 0),
+            int(features.shape[0]),
+        )
 
         deviations = np.abs(features - prototype_mean) / (prototype_std + 1e-6)
         top_indices = np.argsort(deviations)[-5:][::-1]
@@ -441,23 +484,29 @@ def _run_mistake_analysis(predicted_shot: str, features: np.ndarray) -> dict[str
                     }
                 )
 
-        return {
+        result = {
             "mistakes": mistakes,
             "prototype_samples": prototype_data.get("samples", 0),
             "analysis_method": "efficientnetb4_gru_embedding",
         }
+        logger.info(
+            "shot_classifier mistake_analysis completed predicted_shot={} mistakes_count={} top_deviation={:.3f}",
+            predicted_shot,
+            len(mistakes),
+            float(np.max(deviations)) if deviations.size else 0.0,
+        )
+        return result
     except Exception as exc:
-        logger.warning("Mistake analysis failed: {}", exc)
+        logger.warning("shot_classifier mistake_analysis failed predicted_shot={} error={}", predicted_shot, exc)
         return {}
 
 
 def _generate_ai_feedback(predicted_shot: str, confidence: float, mistakes: list[dict[str, Any]]) -> str:
     global _logged_missing_genai
 
-    has_api_key = bool(os.getenv("GEMINI_API_KEY"))
-    has_genai_sdk = importlib.util.find_spec("google.genai") is not None
+    status = get_google_genai_status()
 
-    if has_api_key and has_genai_sdk:
+    if status.enabled:
         try:
             from .assets.utils.ai_feedback_generator import AIFeedbackGenerator
 
@@ -474,9 +523,8 @@ def _generate_ai_feedback(predicted_shot: str, confidence: float, mistakes: list
             logger.warning("AI feedback generation failed: {}", exc)
     elif not _logged_missing_genai:
         logger.info(
-            "AI feedback disabled for shot_classifier: {}{}",
-            "missing GEMINI_API_KEY" if not has_api_key else "",
-            " and missing google-genai SDK" if not has_genai_sdk and not has_api_key else "missing google-genai SDK" if not has_genai_sdk else "",
+            "AI feedback disabled for shot_classifier: {}",
+            status.reason or "not configured",
         )
         _logged_missing_genai = True
 

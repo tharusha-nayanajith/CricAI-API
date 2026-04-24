@@ -13,7 +13,7 @@ class ShotClassifierResult(BaseModel):
     frame_start_index: int
     frame_end_index: int
     roi_entry_frame_index: int | None = None
-    trigger_source: Literal["batter_roi_entry", "bat_contact_fallback"]
+    trigger_source: Literal["batter_roi_entry", "bat_contact_fallback", "ball_path_end_fallback"]
     video_url: str | None = Field(default=None)
     
     # Optional analysis fields - populated if mistake analysis requested

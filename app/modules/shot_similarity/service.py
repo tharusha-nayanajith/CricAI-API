@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from loguru import logger
 
+from app.config import get_settings
 from app.exceptions import FeatureError
 from app.models.artifacts import VideoArtifacts
 from app.modules.action_legality.service import _extract_keypoints_from_frame
@@ -18,7 +21,15 @@ from .models import PoseKeypoint, ShotReference, ShotSimilarityResult
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 REFERENCE_LIBRARY_PATH = ASSETS_DIR / "golden_frames.json"
 
-_reference_library: dict[str, dict[str, ShotReference]] | None = None
+_reference_library: list["_LoadedShotReference"] | None = None
+
+
+@dataclass(slots=True)
+class _LoadedShotReference:
+    player_name: str
+    shot_label: str
+    canonical_shot_type: str
+    frames: list[list[PoseKeypoint]]
 
 
 class ShotSimilarityService:
@@ -26,14 +37,19 @@ class ShotSimilarityService:
         self,
         artifacts: VideoArtifacts,
         video_url: str | None = None,
+        classified_shot_type: str | None = None,
     ) -> ShotSimilarityResult:
         frame = _resolve_comparison_frame(artifacts)
-        logger.info("Starting shot_similarity analysis video_url={}", video_url)
+        logger.info(
+            "Starting shot_similarity analysis video_url={} classified_shot_type={}",
+            video_url,
+            classified_shot_type,
+        )
         loop = asyncio.get_running_loop()
         try:
             result = await loop.run_in_executor(
                 None,
-                partial(self._run_sync, frame, video_url),
+                partial(self._run_sync, frame, video_url, classified_shot_type),
             )
         except FeatureError:
             raise
@@ -53,6 +69,7 @@ class ShotSimilarityService:
         self,
         frame_bgr: np.ndarray,
         video_url: str | None,
+        classified_shot_type: str | None,
     ) -> ShotSimilarityResult:
         reference_library = _load_reference_library()
         keypoints_array = _extract_keypoints_from_frame(frame_bgr, list(range(33)))
@@ -60,20 +77,32 @@ class ShotSimilarityService:
             raise FeatureError("Pose landmarks were not detected in the shot comparison frame.")
 
         user_keypoints = _array_to_keypoints(keypoints_array)
-        match = _find_best_match(user_keypoints, reference_library)
+        match = _find_best_match(user_keypoints, reference_library, classified_shot_type)
         if match is None:
+            if classified_shot_type is not None:
+                raise FeatureError(
+                    "No reference shots are available for classified shot type "
+                    f"'{classified_shot_type}'."
+                )
             raise FeatureError("No reference shots are available for similarity comparison.")
 
         avg_visibility = float(
             np.mean([keypoint.visibility for keypoint in user_keypoints]) * 100.0
         )
+        feedback = list(match["feedback"])
+        if match["reference_shot"] != match["canonical_shot_type"]:
+            feedback.insert(
+                0,
+                f"Compared against the {match['reference_shot']} reference from {match['player']}.",
+            )
+        shot_type = classified_shot_type or str(match["canonical_shot_type"])
         return ShotSimilarityResult(
-            similarity_percentage=round(match["similarity"], 2),
-            matched_player=match["player"],
-            shot_type=match["shot"],
+            similarity_percentage=round(float(match["similarity"]), 2),
+            matched_player=str(match["player"]),
+            shot_type=shot_type,
             keypoints_detected=len(user_keypoints),
             confidence=round(avg_visibility, 2),
-            feedback=match["feedback"][:5],
+            feedback=feedback[:5],
             compared_frame="bat_contact_frame",
             video_url=video_url,
         )
@@ -88,26 +117,132 @@ def _resolve_comparison_frame(artifacts: VideoArtifacts) -> np.ndarray:
     return artifacts.bat_contact_frame
 
 
-def _load_reference_library() -> dict[str, dict[str, ShotReference]]:
+def _load_reference_library() -> list[_LoadedShotReference]:
     global _reference_library
     if _reference_library is None:
-        if not REFERENCE_LIBRARY_PATH.exists():
+        references: list[_LoadedShotReference] = []
+        settings = get_settings()
+        external_reference_dir = settings.shot_similarity_reference_dir
+        if external_reference_dir:
+            references.extend(_load_directory_reference_library(Path(external_reference_dir)))
+        if REFERENCE_LIBRARY_PATH.exists():
+            references.extend(_load_legacy_reference_library(REFERENCE_LIBRARY_PATH))
+        if not references:
             raise FeatureError(
-                "Shot similarity reference library is missing. "
-                f"Add golden shot keypoints at {REFERENCE_LIBRARY_PATH}."
+                "Shot similarity reference library is missing. Configure "
+                "SHOT_SIMILARITY_REFERENCE_DIR or add references at "
+                f"{REFERENCE_LIBRARY_PATH}."
             )
-        try:
-            raw = json.loads(REFERENCE_LIBRARY_PATH.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise FeatureError("Shot similarity reference library JSON is invalid.") from exc
-
-        parsed: dict[str, dict[str, ShotReference]] = {}
-        for player_name, shots in raw.items():
-            parsed[player_name] = {}
-            for shot_type, shot_payload in shots.items():
-                parsed[player_name][shot_type] = ShotReference.model_validate(shot_payload)
-        _reference_library = parsed
+        _reference_library = references
     return _reference_library
+
+
+def _load_directory_reference_library(root: Path) -> list[_LoadedShotReference]:
+    root = root.expanduser().resolve()
+    if not root.exists():
+        raise FeatureError(
+            f"Shot similarity reference directory does not exist: {root}"
+        )
+
+    references: list[_LoadedShotReference] = []
+    for json_path in sorted(root.rglob('*.json')):
+        try:
+            raw = json.loads(json_path.read_text(encoding='utf-8'))
+        except json.JSONDecodeError as exc:
+            raise FeatureError(
+                f"Shot similarity reference file is invalid JSON: {json_path}"
+            ) from exc
+
+        frames_payload = raw.get('frames')
+        if not isinstance(frames_payload, list):
+            continue
+
+        frames = [frame for frame in (_parse_frame_payload(frame_payload) for frame_payload in frames_payload) if frame]
+        if not frames:
+            continue
+
+        canonical_shot_type = _canonical_shot_type(json_path.stem)
+        if canonical_shot_type is None:
+            logger.warning('Skipping unsupported shot similarity reference file {}', json_path)
+            continue
+
+        player_path = json_path.parent.relative_to(root)
+        player_name = player_path.parts[0] if player_path.parts else root.name
+        references.append(
+            _LoadedShotReference(
+                player_name=_humanize_label(player_name),
+                shot_label=_humanize_label(json_path.stem),
+                canonical_shot_type=canonical_shot_type,
+                frames=frames,
+            )
+        )
+
+    return references
+
+
+def _load_legacy_reference_library(path: Path) -> list[_LoadedShotReference]:
+    try:
+        raw = json.loads(path.read_text(encoding='utf-8'))
+    except json.JSONDecodeError as exc:
+        raise FeatureError('Shot similarity reference library JSON is invalid.') from exc
+
+    references: list[_LoadedShotReference] = []
+    for player_name, shots in raw.items():
+        if not isinstance(shots, dict):
+            continue
+        for shot_type, shot_payload in shots.items():
+            shot_reference = ShotReference.model_validate(shot_payload)
+            canonical_shot_type = _canonical_shot_type(shot_type)
+            if canonical_shot_type is None:
+                logger.warning(
+                    'Skipping unsupported legacy shot similarity reference {} / {}',
+                    player_name,
+                    shot_type,
+                )
+                continue
+            references.append(
+                _LoadedShotReference(
+                    player_name=_humanize_label(player_name),
+                    shot_label=_humanize_label(shot_type),
+                    canonical_shot_type=canonical_shot_type,
+                    frames=[shot_reference.keypoints],
+                )
+            )
+    return references
+
+
+def _parse_frame_payload(frame_payload: Any) -> list[PoseKeypoint]:
+    if not isinstance(frame_payload, list):
+        return []
+    try:
+        return [PoseKeypoint.model_validate(point) for point in frame_payload]
+    except Exception:
+        return []
+
+
+def _humanize_label(value: str) -> str:
+    return value.replace('_', ' ').replace('-', ' ').strip().title()
+
+
+def _canonical_shot_type(raw_shot_type: str | None) -> str | None:
+    if not raw_shot_type:
+        return None
+    normalized = raw_shot_type.strip().lower().replace('-', '_').replace(' ', '_')
+    alias_groups = {
+        'cut': ('cut', 'square_cut', 'cut_shot'),
+        'drive': ('drive', 'cover_drive', 'straight_drive', 'off_drive', 'drive_shot'),
+        'flick': ('flick', 'on_drive', 'clip', 'leg_glance', 'flick_shot'),
+        'pull': ('pull', 'hook', 'pull_shot', 'hook_shot'),
+        'slog': ('slog', 'slog_shot', 'lofted_drive', 'slog_sweep'),
+        'sweep': ('sweep', 'sweep_shot', 'reverse_sweep', 'paddle_sweep'),
+        'misc': ('misc', 'miscellaneous', 'other'),
+    }
+    for canonical, aliases in alias_groups.items():
+        if normalized in aliases:
+            return canonical
+        if canonical != 'misc' and normalized.startswith(f'{canonical}_'):
+            return canonical
+    return None
 
 
 def _array_to_keypoints(keypoints_array: np.ndarray) -> list[PoseKeypoint]:
@@ -177,24 +312,24 @@ def _calculate_similarity(
         total_weight += weight
 
     key_angles = {
-        "left_elbow": (11, 13, 15),
-        "right_elbow": (12, 14, 16),
-        "left_shoulder": (13, 11, 23),
-        "right_shoulder": (14, 12, 24),
-        "left_hip": (11, 23, 25),
-        "right_hip": (12, 24, 26),
-        "left_knee": (23, 25, 27),
-        "right_knee": (24, 26, 28),
+        'left_elbow': (11, 13, 15),
+        'right_elbow': (12, 14, 16),
+        'left_shoulder': (13, 11, 23),
+        'right_shoulder': (14, 12, 24),
+        'left_hip': (11, 23, 25),
+        'right_hip': (12, 24, 26),
+        'left_knee': (23, 25, 27),
+        'right_knee': (24, 26, 28),
     }
     angle_feedback_messages = {
-        "left_elbow": "Bend your left elbow more.",
-        "right_elbow": "Keep your right arm straighter.",
-        "left_shoulder": "Open up your left shoulder.",
-        "right_shoulder": "Rotate your right shoulder more.",
-        "left_hip": "Engage your left hip.",
-        "right_hip": "Drive through with your right hip.",
-        "left_knee": "Bend your left knee more for stability.",
-        "right_knee": "Ensure your right knee is stable.",
+        'left_elbow': 'Bend your left elbow more.',
+        'right_elbow': 'Keep your right arm straighter.',
+        'left_shoulder': 'Open up your left shoulder.',
+        'right_shoulder': 'Rotate your right shoulder more.',
+        'left_hip': 'Engage your left hip.',
+        'right_hip': 'Drive through with your right hip.',
+        'left_knee': 'Bend your left knee more for stability.',
+        'right_knee': 'Ensure your right knee is stable.',
     }
 
     for angle_name, (p1_idx, p2_idx, p3_idx) in key_angles.items():
@@ -222,27 +357,69 @@ def _calculate_similarity(
 
     overall_similarity = (total_similarity / total_weight) * 100.0 if total_weight else 0.0
     return {
-        "similarity": overall_similarity,
-        "feedback": feedback,
+        'similarity': overall_similarity,
+        'feedback': feedback,
     }
+
+
+def _coerce_reference_library(
+    reference_library: Any,
+) -> list[_LoadedShotReference]:
+    if isinstance(reference_library, list):
+        return reference_library
+
+    coerced: list[_LoadedShotReference] = []
+    if isinstance(reference_library, dict):
+        for player_name, shots in reference_library.items():
+            if not isinstance(shots, dict):
+                continue
+            for shot_type, shot_reference in shots.items():
+                if not isinstance(shot_reference, ShotReference):
+                    shot_reference = ShotReference.model_validate(shot_reference)
+                canonical_shot_type = _canonical_shot_type(shot_type)
+                if canonical_shot_type is None:
+                    continue
+                coerced.append(
+                    _LoadedShotReference(
+                        player_name=str(player_name),
+                        shot_label=str(shot_type),
+                        canonical_shot_type=canonical_shot_type,
+                        frames=[shot_reference.keypoints],
+                    )
+                )
+    return coerced
 
 
 def _find_best_match(
     user_keypoints: list[PoseKeypoint],
-    reference_library: dict[str, dict[str, ShotReference]],
+    reference_library: Any,
+    classified_shot_type: str | None,
 ) -> dict[str, str | float | list[str]] | None:
+    candidate_references = _coerce_reference_library(reference_library)
+    canonical_shot_type = _canonical_shot_type(classified_shot_type)
+    if canonical_shot_type is not None:
+        candidate_references = [
+            reference
+            for reference in candidate_references
+            if reference.canonical_shot_type == canonical_shot_type
+        ]
+    if not candidate_references:
+        return None
+
     best_match: dict[str, str | float | list[str]] | None = None
     best_similarity = -1.0
-    for player_name, shots in reference_library.items():
-        for shot_type, shot_reference in shots.items():
-            result = _calculate_similarity(user_keypoints, shot_reference.keypoints)
-            similarity = float(result["similarity"])
+    for reference in candidate_references:
+        for frame_keypoints in reference.frames:
+            result = _calculate_similarity(user_keypoints, frame_keypoints)
+            similarity = float(result['similarity'])
             if similarity > best_similarity:
                 best_similarity = similarity
                 best_match = {
-                    "player": player_name,
-                    "shot": shot_type,
-                    "similarity": similarity,
-                    "feedback": result["feedback"],
+                    'player': reference.player_name,
+                    'shot': reference.canonical_shot_type,
+                    'reference_shot': reference.shot_label,
+                    'canonical_shot_type': reference.canonical_shot_type,
+                    'similarity': similarity,
+                    'feedback': list(result['feedback']),
                 }
     return best_match
