@@ -17,6 +17,7 @@ FeatureName = Literal[
     "shot_similarity",
 ]
 FeatureStatus = Literal["pending", "processing", "done", "failed"]
+OverallStatus = Literal["pending", "processing", "done", "partial", "failed"]
 
 
 def _default_feature_result() -> FeatureResult:
@@ -38,12 +39,16 @@ def _results_key(job_id: str) -> str:
     return f"results:{job_id}"
 
 
-def _compute_overall_status(
-    job_status: JobStatus,
-) -> Literal["pending", "processing", "done", "partial"]:
+def _results_events_channel(job_id: str) -> str:
+    return f"results_events:{job_id}"
+
+
+def _compute_overall_status(job_status: JobStatus) -> OverallStatus:
     statuses = [getattr(job_status, name).status for name in FEATURE_NAMES]
     if all(status == "done" for status in statuses):
         return "done"
+    if all(status == "failed" for status in statuses):
+        return "failed"
     if any(status == "failed" for status in statuses) and any(
         status == "done" for status in statuses
     ):
@@ -53,10 +58,16 @@ def _compute_overall_status(
     return "pending"
 
 
-async def initialize_job_status(job_id: str) -> JobStatus:
+async def _save_job_status(job_status: JobStatus) -> None:
     redis = get_redis()
+    payload = job_status.model_dump_json()
+    await redis.set(_results_key(job_status.job_id), payload, ex=RESULTS_TTL_SECONDS)
+    await redis.publish(_results_events_channel(job_status.job_id), payload)
+
+
+async def initialize_job_status(job_id: str) -> JobStatus:
     job_status = _build_default_job_status(job_id)
-    await redis.set(_results_key(job_id), job_status.model_dump_json(), ex=RESULTS_TTL_SECONDS)
+    await _save_job_status(job_status)
     return job_status
 
 
@@ -73,7 +84,7 @@ async def store_result(job_id: str, module_name: str, result: FeatureResult) -> 
     )
     setattr(job_status, module_name, result)
     job_status.overall_status = _compute_overall_status(job_status)
-    await redis.set(_results_key(job_id), job_status.model_dump_json(), ex=RESULTS_TTL_SECONDS)
+    await _save_job_status(job_status)
 
 
 async def get_job_status(job_id: str) -> JobStatus:
@@ -101,4 +112,4 @@ async def set_feature_status(job_id: str, module_name: str, status: str) -> None
     updated_feature = current_feature.model_copy(update={"status": cast(FeatureStatus, status)})
     setattr(job_status, module_name, updated_feature)
     job_status.overall_status = _compute_overall_status(job_status)
-    await redis.set(_results_key(job_id), job_status.model_dump_json(), ex=RESULTS_TTL_SECONDS)
+    await _save_job_status(job_status)

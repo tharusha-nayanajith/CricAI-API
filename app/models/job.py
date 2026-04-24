@@ -11,7 +11,7 @@ class FeatureResult(BaseModel):
 
 class JobStatus(BaseModel):
     job_id: str
-    overall_status: Literal["pending", "processing", "done", "partial"]
+    overall_status: Literal["pending", "processing", "done", "partial", "failed"]
     bowler_performance: FeatureResult
     action_legality: FeatureResult
     shot_classifier: FeatureResult
