@@ -89,11 +89,13 @@ class DeliveryFeatures(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     batter_mode: str = Field(serialization_alias="batterMode")
+    batter_handedness: str = Field(serialization_alias="batterHandedness")
     has_bat_contact: str = Field(serialization_alias="hasBatContact")
     contact_method: str = Field(serialization_alias="contactMethod")
     trajectory_reliable: str = Field(serialization_alias="trajectoryReliable")
     length_class: str | None = Field(default=None, serialization_alias="lengthClass")
     line_bucket: str | None = Field(default=None, serialization_alias="lineBucket")
+    physical_line_bucket: str | None = Field(default=None, serialization_alias="physicalLineBucket")
     pace_bucket: str | None = Field(default=None, serialization_alias="paceBucket")
     fps: float
     release_frame_idx: float | None = Field(default=None, serialization_alias="releaseFrameIdx")

@@ -36,6 +36,12 @@ class BatterMode(enum.Enum):
     PRESENT = "present"
 
 
+class BatterHandedness(enum.Enum):
+    UNKNOWN = "unknown"
+    RIGHT = "right"
+    LEFT = "left"
+
+
 @dataclass(slots=True)
 class BatterROI:
     x: int
@@ -63,6 +69,7 @@ class DeliveryContext:
     standardized_video_path: Path
     batter_mode: BatterMode
     batter_roi: BatterROI | None
+    batter_handedness: BatterHandedness = BatterHandedness.UNKNOWN
     fps: float = 0.0
     release_point: ReleasePoint | None = None
     batter_roi_entry_frame_idx: int | None = None

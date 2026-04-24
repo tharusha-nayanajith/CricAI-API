@@ -23,7 +23,12 @@ from app.modules.preprocessor.constants import (
     STANDARDIZED_HEIGHT,
     STANDARDIZED_WIDTH,
 )
-from app.modules.preprocessor.models import BatterMode, DeliveryContext, ReleasePoint
+from app.modules.preprocessor.models import (
+    BatterHandedness,
+    BatterMode,
+    DeliveryContext,
+    ReleasePoint,
+)
 from app.modules.preprocessor.release_detector import ReleaseDetector
 
 _release_detector: ReleaseDetector | None = None
@@ -123,7 +128,7 @@ class VideoPreprocessor:
 
         started = time.perf_counter()
         batter_detector = get_batter_detector()
-        batter_mode, batter_roi = await loop.run_in_executor(
+        batter_mode, batter_roi, batter_handedness = await loop.run_in_executor(
             None,
             partial(batter_detector.detect, std_path, calibration),
         )
@@ -137,6 +142,7 @@ class VideoPreprocessor:
             standardized_video_path=std_path,
             batter_mode=batter_mode,
             batter_roi=batter_roi,
+            batter_handedness=batter_handedness,
             fps=fps,
         )
 
@@ -161,6 +167,7 @@ class VideoPreprocessor:
                 standardized_video_path=std_path,
                 release_point=ctx.release_point,
                 batter_mode=ctx.batter_mode,
+                batter_handedness=ctx.batter_handedness,
                 bat_contact=None,
                 ball_candidates_by_frame=[],
             )
@@ -225,6 +232,7 @@ class VideoPreprocessor:
             standardized_video_path=std_path,
             release_point=ctx.release_point,
             batter_mode=ctx.batter_mode,
+            batter_handedness=ctx.batter_handedness,
             batter_roi_entry_frame_idx=ctx.batter_roi_entry_frame_idx,
             bat_contact=ctx.bat_contact,
             ball_candidates_by_frame=ball_candidates_by_frame,

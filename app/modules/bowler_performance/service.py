@@ -39,7 +39,7 @@ from app.modules.bowler_performance.pitch_coordinates import (
 from app.modules.bowler_performance.ransac import BallPathCleaner
 from app.modules.bowler_performance.trajectory import AnchorTrajectory, build_anchor_trajectory
 from app.modules.bowler_performance.wicket_risk import predict_wicket_risk
-from app.modules.preprocessor.models import BallDetection
+from app.modules.preprocessor.models import BallDetection, BatterHandedness
 
 
 class BowlerPerformanceAnalyzer:
@@ -799,11 +799,25 @@ def _build_delivery_features(
         if contact_pitch_x is not None and bounce_pitch_x is not None
         else None
     )
+    physical_line_bucket = _physical_line_bucket_from_x(bounce_pitch_x)
+    batter_handedness = artifacts.batter_handedness or BatterHandedness.UNKNOWN
+    line_bucket = _display_line_bucket(physical_line_bucket, batter_handedness)
+    logger.info(
+        "Delivery line classification bounce_pitch_x={} release_pitch_x={} "
+        "contact_pitch_x={} batter_handedness={} physical_line_bucket={} line_bucket={}",
+        bounce_pitch_x,
+        release_pitch_x,
+        contact_pitch_x,
+        batter_handedness.value,
+        physical_line_bucket,
+        line_bucket,
+    )
 
     return DeliveryFeatures(
         batter_mode=(
             artifacts.batter_mode.value if artifacts.batter_mode is not None else "none"
         ),
+        batter_handedness=batter_handedness.value,
         has_bat_contact=str(artifacts.bat_contact is not None),
         contact_method=(
             artifacts.bat_contact.method.value if artifacts.bat_contact is not None else "none"
@@ -812,7 +826,8 @@ def _build_delivery_features(
         length_class=(
             result.length_class.value if result.length_class is not None else None
         ),
-        line_bucket=_line_bucket_from_x(bounce_pitch_x),
+        line_bucket=line_bucket,
+        physical_line_bucket=physical_line_bucket,
         pace_bucket=_pace_bucket_from_release_to_bounce_ms(release_to_bounce_ms),
         fps=float(fps),
         release_frame_idx=release_frame_idx,
@@ -875,20 +890,65 @@ def _split_counts(
     return pre, post
 
 
-def _line_bucket_from_x(bounce_pitch_x: float | None) -> str | None:
+def _physical_line_bucket_from_x(bounce_pitch_x: float | None) -> str | None:
     if bounce_pitch_x is None:
         return None
-    if bounce_pitch_x <= -0.65:
-        return "wide_outside_off"
-    if bounce_pitch_x <= -0.22:
-        return "outside_off"
-    if bounce_pitch_x <= 0.08:
-        return "off_stump"
-    if bounce_pitch_x <= 0.24:
+
+    stump_spacing = STUMP_HALF_WIDTH_METRES
+    left_stump_boundary_x = -0.5 * stump_spacing
+    middle_boundary_x = 0.5 * stump_spacing
+    right_stump_boundary_x = STUMP_HALF_WIDTH_METRES + (0.5 * stump_spacing)
+    left_outside_boundary_x = -STUMP_HALF_WIDTH_METRES - (0.5 * stump_spacing)
+    right_outside_boundary_x = STUMP_HALF_WIDTH_METRES + (1.5 * stump_spacing)
+    left_wide_boundary_x = -STUMP_HALF_WIDTH_METRES - (1.5 * stump_spacing)
+
+    if bounce_pitch_x < left_wide_boundary_x:
+        return "left_wide"
+    if bounce_pitch_x < left_outside_boundary_x:
+        return "left_outside"
+    if bounce_pitch_x < left_stump_boundary_x:
+        return "left_stump"
+    if bounce_pitch_x <= middle_boundary_x:
         return "middle"
-    if bounce_pitch_x <= 0.5:
-        return "leg_stump"
-    return "wide_leg"
+    if bounce_pitch_x <= right_stump_boundary_x:
+        return "right_stump"
+    if bounce_pitch_x <= right_outside_boundary_x:
+        return "right_outside"
+    return "right_wide"
+
+
+def _display_line_bucket(
+    physical_line_bucket: str | None,
+    batter_handedness: BatterHandedness,
+) -> str | None:
+    if physical_line_bucket is None:
+        return None
+
+    if batter_handedness is BatterHandedness.RIGHT:
+        mapping = {
+            "left_wide": "wide_outside_off",
+            "left_outside": "outside_off",
+            "left_stump": "off_stump",
+            "middle": "middle",
+            "right_stump": "leg_stump",
+            "right_outside": "outside_leg",
+            "right_wide": "wide_leg",
+        }
+        return mapping[physical_line_bucket]
+
+    if batter_handedness is BatterHandedness.LEFT:
+        mapping = {
+            "left_wide": "wide_leg",
+            "left_outside": "outside_leg",
+            "left_stump": "leg_stump",
+            "middle": "middle",
+            "right_stump": "off_stump",
+            "right_outside": "outside_off",
+            "right_wide": "wide_outside_off",
+        }
+        return mapping[physical_line_bucket]
+
+    return physical_line_bucket
 
 
 def _pace_bucket_from_release_to_bounce_ms(release_to_bounce_ms: float | None) -> str | None:
