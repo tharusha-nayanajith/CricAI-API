@@ -43,3 +43,6 @@ Synthetic_Dataset/
 
 # Local storage artifacts
 *.db
+
+# Broken local artifacts and duplicate model backups
+*.broken
