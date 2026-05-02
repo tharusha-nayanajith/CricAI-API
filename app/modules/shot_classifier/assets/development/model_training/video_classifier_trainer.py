@@ -29,7 +29,7 @@ from typing import Dict, Tuple, List
 from datetime import datetime
 import pathlib
 
-from features.SHOT_CLASSIFICATION_SYSTEM.utils.config import (
+from app.modules.shot_classifier.assets.utils.config import (
     SHOT_TYPES, MODEL_FOLDER_PATH, DATASET_PATH, SUPPORTED_VIDEO_EXTENSIONS
 )
 
