@@ -49,6 +49,7 @@ class BallTrackPayload(BaseModel):
 
     pitch_x: float | None = Field(default=None, serialization_alias="pitchX")
     pitch_y: float | None = Field(default=None, serialization_alias="pitchY")
+    pitch_z: float | None = Field(default=None, serialization_alias="pitchZ")
     min_frame_idx: float = Field(serialization_alias="minFrameIdx")
     max_frame_idx: float = Field(serialization_alias="maxFrameIdx")
     parameter_x_array: list[float] = Field(serialization_alias="parameterXArray")
@@ -133,6 +134,7 @@ class DeliveryFeatures(BaseModel):
     inlier_count: int = Field(serialization_alias="inlierCount")
     bounce_pitch_x: float | None = Field(default=None, serialization_alias="bouncePitchX")
     bounce_pitch_y: float | None = Field(default=None, serialization_alias="bouncePitchY")
+    bounce_pitch_z: float | None = Field(default=None, serialization_alias="bouncePitchZ")
     tracking_confidence: float = Field(serialization_alias="trackingConfidence")
     release_confidence: float | None = Field(default=None, serialization_alias="releaseConfidence")
     contact_score: float | None = Field(default=None, serialization_alias="contactScore")
@@ -140,6 +142,7 @@ class DeliveryFeatures(BaseModel):
     contact_height_m: float | None = Field(default=None, serialization_alias="contactHeightM")
     release_pitch_x: float | None = Field(default=None, serialization_alias="releasePitchX")
     contact_pitch_x: float | None = Field(default=None, serialization_alias="contactPitchX")
+    contact_pitch_z: float | None = Field(default=None, serialization_alias="contactPitchZ")
     pre_bounce_lateral_delta: float | None = Field(
         default=None,
         serialization_alias="preBounceLateralDelta",
@@ -168,6 +171,10 @@ class FlutterPayloadEntry(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     video_url: str | None = Field(default=None, serialization_alias="videoURL")
+    thumbnail_image_url: str | None = Field(
+        default=None,
+        serialization_alias="thumbnailImageUrl",
+    )
     delivery_features: DeliveryFeatures | None = Field(
         default=None,
         serialization_alias="deliveryFeatures",
@@ -210,6 +217,10 @@ class BowlerPerformanceResult(BaseModel):
         serialization_alias="wicketRisk",
     )
     video_url: str | None = Field(default=None, serialization_alias="videoURL")
+    thumbnail_image_url: str | None = Field(
+        default=None,
+        serialization_alias="thumbnailImageUrl",
+    )
     ball_track: BallTrackPayload | None = Field(default=None, serialization_alias="ballTrack")
     camera_calibration: CameraCalibrationPayload | None = Field(
         default=None,
@@ -221,7 +232,9 @@ class BowlerPerformanceResult(BaseModel):
     )
 
 
-def classify_length(z_metres: float) -> LengthClass:
+def classify_length(z_metres: float) -> LengthClass | None:
+    if z_metres < 0.0:
+        return None
     if z_metres <= YORKER_MAX:
         return LengthClass.YORKER
     if z_metres <= FULL_MAX:

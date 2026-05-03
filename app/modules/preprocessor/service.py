@@ -37,19 +37,35 @@ _ball_tracker: BallTracker | None = None
 _bat_contact_detector: BatContactDetector | None = None
 
 
+def _reset_release_related_detectors() -> None:
+    global _release_detector, _batter_detector
+    _release_detector = None
+    _batter_detector = None
+
+
 def get_release_detector() -> ReleaseDetector:
     global _release_detector
     if _release_detector is None:
-        _release_detector = ReleaseDetector(RELEASE_MODEL_PATH, POSENET_MODEL_PATH)
-        _release_detector.load_models()
+        detector = ReleaseDetector(RELEASE_MODEL_PATH, POSENET_MODEL_PATH)
+        try:
+            detector.load_models()
+        except Exception:
+            _reset_release_related_detectors()
+            raise
+        _release_detector = detector
     return _release_detector
 
 
 def get_batter_detector() -> BatterDetector:
     global _batter_detector
     if _batter_detector is None:
-        release_detector = get_release_detector()
+        try:
+            release_detector = get_release_detector()
+        except Exception:
+            _reset_release_related_detectors()
+            raise
         if release_detector.posenet_interpreter is None:
+            _reset_release_related_detectors()
             raise PreprocessingError("Release detector PoseNet interpreter is not available.")
         _batter_detector = BatterDetector(release_detector.posenet_interpreter)
     return _batter_detector
@@ -128,9 +144,9 @@ class VideoPreprocessor:
 
         started = time.perf_counter()
         batter_detector = get_batter_detector()
-        batter_mode, batter_roi, batter_handedness = await loop.run_in_executor(
-            None,
-            partial(batter_detector.detect, std_path, calibration),
+        batter_mode, batter_roi, batter_handedness = batter_detector.detect(
+            std_path,
+            calibration,
         )
         timings_ms["batter_detect"] = _elapsed_ms(started)
 
@@ -248,14 +264,11 @@ class VideoPreprocessor:
         frame_idx = 0
         try:
             while True:
-                ret, frame = await loop.run_in_executor(None, cap.read)
+                ret, frame = cap.read()
                 if not ret:
                     break
 
-                release_point = await loop.run_in_executor(
-                    None,
-                    partial(release_detector.process_frame, frame, frame_idx, ctx.fps),
-                )
+                release_point = release_detector.process_frame(frame, frame_idx, ctx.fps)
                 if release_point is not None:
                     release_detector.reset()
                     return release_point

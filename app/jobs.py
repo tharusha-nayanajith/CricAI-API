@@ -18,6 +18,7 @@ from app.modules.shot_classifier.models import ShotClassifierResult
 from app.modules.bowler_performance.service import BowlerPerformanceAnalyzer
 from app.modules.preprocessor.models import BallDetection
 from app.modules.preprocessor.service import VideoPreprocessor
+from app.storage.artifacts import write_image_artifact
 from app.storage.results import set_feature_status, store_result
 
 _preprocessor = VideoPreprocessor()
@@ -90,6 +91,24 @@ async def run_bowler_performance(
     await set_feature_status(job_id, "bowler_performance", "processing")
     try:
         result = await _bowler_analyzer.run(artifacts, calibration, fps, video_url=video_url)
+        thumbnail_image_url = None
+        if artifacts.release_frame is not None:
+            thumbnail_image_url = write_image_artifact(
+                job_id,
+                "bowler_performance",
+                "thumbnail.jpg",
+                artifacts.release_frame,
+            )
+        if thumbnail_image_url is not None:
+            result = result.model_copy(
+                update={
+                    "thumbnail_image_url": thumbnail_image_url,
+                    "flutter_payload": [
+                        entry.model_copy(update={"thumbnail_image_url": thumbnail_image_url})
+                        for entry in result.flutter_payload
+                    ],
+                }
+            )
         await store_result(
             job_id,
             "bowler_performance",
@@ -178,11 +197,13 @@ async def _compute_shot_classifier_result(
     artifacts: VideoArtifacts,
     video_path: Path,
     video_url: str,
+    intended_shot: str | None = None,
 ) -> ShotClassifierResult:
     return await _shot_classifier_service.run(
         artifacts,
         video_path=video_path,
         video_url=video_url,
+        intended_shot=intended_shot,
     )
 
 
@@ -191,6 +212,7 @@ async def run_shot_classifier(
     artifacts: VideoArtifacts,
     video_path: Path,
     video_url: str,
+    intended_shot: str | None = None,
 ) -> None:
     await set_feature_status(job_id, "shot_classifier", "processing")
     try:
@@ -198,6 +220,7 @@ async def run_shot_classifier(
             artifacts,
             video_path=video_path,
             video_url=video_url,
+            intended_shot=intended_shot,
         )
         await store_result(
             job_id,
@@ -226,6 +249,7 @@ async def process_job(
     source_video_path: str,
     filename: str,
     calibration_payload: dict[str, Any],
+    intended_shot: str | None = None,
 ) -> None:
     logger.info("Queued job {} with features {}", job_id, selected_features)
     implemented_features = [
@@ -280,6 +304,7 @@ async def process_job(
                     artifacts,
                     video_path,
                     safe_name,
+                    intended_shot=intended_shot,
                 )
             except FeatureError as exc:
                 classifier_error = exc

@@ -238,7 +238,7 @@ async def test_run_returns_bowler_performance_result_with_valid_mocked_inputs(
     assert result.camera_calibration.dimensions == [1920, 1080]
     assert result.delivery_features is not None
     assert result.delivery_features.batter_mode == "present"
-    assert result.delivery_features.line_bucket == "leg_stump"
+    assert result.delivery_features.line_bucket == "right_wide"
     assert result.wicket_risk is not None
     assert result.wicket_risk.risk_band is WicketRiskBand.HIGH
     assert result.flutter_payload

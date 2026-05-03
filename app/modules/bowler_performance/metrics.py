@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+from loguru import logger
 
 from app.modules.bowler_performance.models import (
     BouncePoint,
@@ -83,6 +84,21 @@ def compute_bounce_and_length(
     return BouncePoint(x_metres=bounce_x, z_metres=bounce_z), length_class
 
 
+def _is_plausible_canonical_bounce_point(
+    canonical_bounce_point: BouncePoint,
+    raw_bounce_point: BouncePoint | None,
+) -> bool:
+    canonical_z = float(canonical_bounce_point.z_metres)
+    if canonical_z < 0.0 or canonical_z > BOWLING_STUMP_Z_METRES:
+        return False
+
+    if raw_bounce_point is None:
+        return True
+
+    raw_z = float(raw_bounce_point.z_metres)
+    return abs(canonical_z - raw_z) <= 2.0
+
+
 def compute_proxy_speed(
     inliers: list[BallDetection],
     bounce_frame: int | None,
@@ -126,9 +142,27 @@ def build_result(
 ) -> BowlerPerformanceResult:
     _ = world_points
     bounce_point, length_class = compute_bounce_and_length(pitch_points, bounce_frame)
+    raw_bounce_point = bounce_point
     if canonical_bounce_point is not None:
-        bounce_point = canonical_bounce_point
-        length_class = classify_length(canonical_bounce_point.z_metres)
+        if _is_plausible_canonical_bounce_point(canonical_bounce_point, raw_bounce_point):
+            bounce_point = canonical_bounce_point
+            length_class = classify_length(canonical_bounce_point.z_metres)
+        else:
+            logger.warning(
+                "Ignoring implausible canonical bounce point canonical_bounce={} raw_bounce={}",
+                {
+                    "x": round(float(canonical_bounce_point.x_metres), 3),
+                    "z": round(float(canonical_bounce_point.z_metres), 3),
+                },
+                (
+                    {
+                        "x": round(float(raw_bounce_point.x_metres), 3),
+                        "z": round(float(raw_bounce_point.z_metres), 3),
+                    }
+                    if raw_bounce_point is not None
+                    else None
+                ),
+            )
     speed_ms, speed_kmh = compute_proxy_speed(
         inliers,
         bounce_frame,

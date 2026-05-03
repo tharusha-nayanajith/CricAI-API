@@ -42,6 +42,11 @@ from app.modules.bowler_performance.wicket_risk import predict_wicket_risk
 from app.modules.preprocessor.models import BallDetection, BatterHandedness
 
 
+CONTACT_PITCH_Z_MAX_METRES = 3.0
+CONTACT_HEIGHT_MAX_METRES = 2.8
+LATERAL_CLAMP_TOLERANCE_METRES = 1e-3
+
+
 class BowlerPerformanceAnalyzer:
     def __init__(self) -> None:
         self._cleaner = BallPathCleaner()
@@ -475,6 +480,9 @@ def _build_ball_track_payload(
         pitch_y=(
             float(pitch_xyz[bounce_index, 2]) if bounce_index is not None else None
         ),
+        pitch_z=(
+            float(pitch_xyz[bounce_index, 2]) if bounce_index is not None else None
+        ),
         min_frame_idx=float(frame_values.min()),
         max_frame_idx=float(frame_values.max()),
         parameter_x_array=coeff_x,
@@ -718,6 +726,32 @@ def _log_stadium_basis_debug(
 
 
 
+def _is_clamped_lateral_value(value: float | None) -> bool:
+    if value is None:
+        return False
+    return abs(abs(float(value)) - 2.5) <= LATERAL_CLAMP_TOLERANCE_METRES
+
+
+def _is_plausible_beehive_contact(
+    trajectory_reliable: bool,
+    contact_point_pitch: TrajectoryPointPitch | None,
+    contact_point_3d: TrajectoryPoint3D | None,
+) -> bool:
+    if not trajectory_reliable or contact_point_pitch is None or contact_point_3d is None:
+        return False
+
+    contact_pitch_x = float(contact_point_pitch.pitch_x)
+    contact_pitch_z = float(contact_point_pitch.pitch_z)
+    contact_height_m = float(contact_point_3d.y)
+    if _is_clamped_lateral_value(contact_pitch_x):
+        return False
+    if contact_pitch_z < -0.5 or contact_pitch_z > CONTACT_PITCH_Z_MAX_METRES:
+        return False
+    if contact_height_m < 0.0 or contact_height_m > CONTACT_HEIGHT_MAX_METRES:
+        return False
+    return True
+
+
 def _build_delivery_features(
     artifacts: VideoArtifacts,
     fps: float,
@@ -782,13 +816,42 @@ def _build_delivery_features(
         if result.bounce_point is not None
         else None
     )
-    bounce_pitch_y = (
+    bounce_pitch_z = (
         float(result.bounce_point.z_metres)
         if result.bounce_point is not None
         else None
     )
+    bounce_pitch_y = bounce_pitch_z
     release_pitch_x = release_point_pitch.pitch_x if release_point_pitch is not None else None
-    contact_pitch_x = contact_point_pitch.pitch_x if contact_point_pitch is not None else None
+    raw_contact_pitch_x = (
+        float(contact_point_pitch.pitch_x) if contact_point_pitch is not None else None
+    )
+    raw_contact_pitch_z = (
+        float(contact_point_pitch.pitch_z) if contact_point_pitch is not None else None
+    )
+    raw_contact_height_m = (
+        float(contact_point_3d.y) if contact_point_3d is not None else None
+    )
+    if _is_plausible_beehive_contact(
+        result.trajectory_reliable,
+        contact_point_pitch,
+        contact_point_3d,
+    ):
+        contact_pitch_x = raw_contact_pitch_x
+        contact_pitch_z = raw_contact_pitch_z
+        contact_height_m = raw_contact_height_m
+    else:
+        contact_pitch_x = None
+        contact_pitch_z = None
+        contact_height_m = None
+        if raw_contact_pitch_x is not None or raw_contact_pitch_z is not None or raw_contact_height_m is not None:
+            logger.warning(
+                "Suppressing implausible beehive contact point contact_pitch_x={} contact_pitch_z={} contact_height_m={} trajectory_reliable={}",
+                raw_contact_pitch_x,
+                raw_contact_pitch_z,
+                raw_contact_height_m,
+                result.trajectory_reliable,
+            )
     pre_bounce_lateral_delta = (
         bounce_pitch_x - release_pitch_x
         if bounce_pitch_x is not None and release_pitch_x is not None
@@ -845,6 +908,7 @@ def _build_delivery_features(
         inlier_count=len(inliers),
         bounce_pitch_x=bounce_pitch_x,
         bounce_pitch_y=bounce_pitch_y,
+        bounce_pitch_z=bounce_pitch_z,
         tracking_confidence=float(result.confidence),
         release_confidence=float(artifacts.release_point.confidence),
         contact_score=(
@@ -854,9 +918,10 @@ def _build_delivery_features(
             else None
         ),
         release_height_m=release_point_3d.y if release_point_3d is not None else None,
-        contact_height_m=contact_point_3d.y if contact_point_3d is not None else None,
+        contact_height_m=contact_height_m,
         release_pitch_x=release_pitch_x,
         contact_pitch_x=contact_pitch_x,
+        contact_pitch_z=contact_pitch_z,
         pre_bounce_lateral_delta=pre_bounce_lateral_delta,
         post_bounce_lateral_delta=post_bounce_lateral_delta,
         approach_to_stumps=contact_pitch_x,

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import math
 import os
+import signal
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -17,22 +20,23 @@ from tensorflow.keras.applications.efficientnet import preprocess_input
 from app.ai.google import get_google_genai_status
 from app.exceptions import FeatureError
 from app.models.artifacts import VideoArtifacts
+from app.modules.preprocessor.models import BatterHandedness
 
-from .models import ShotClassifierResult
+from .models import SHOT_CLASS_LABELS, ShotClassifierResult, normalize_shot_label
 
 FRAME_COUNT = 30
 MIN_FRAME_COUNT = 20
 FRAME_SIZE = (224, 224)
 FEATURE_DIM = 128
-
-SHOT_CLASS_LABELS = [
-    "cut", "drive", "flick", "pull", "slog", "sweep", "misc"
-]
+POSE_LANDMARK_IDS = tuple(range(33))
 
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 TRAINED_MODELS_DIR = ASSETS_DIR / "trained_models"
 VIDEO_CLASSIFIER_DIR = TRAINED_MODELS_DIR / "video_classifier"
 PROTOTYPES_PATH = TRAINED_MODELS_DIR / "prototypes" / "shot_prototypes.pkl"
+POSE_LANDMARKER_TASK_PATH = (
+    Path(__file__).resolve().parents[1] / "action_legality" / "assets" / "pose_landmarker.task"
+)
 
 EXTERNAL_MODEL_PATH = (
     Path(__file__).resolve().parents[3].parent / "CricketShotClassification" / "model_weights.h5"
@@ -42,6 +46,10 @@ _model: Any | None = None
 _feature_extractor: Any | None = None
 _prototypes: dict[str, dict[str, Any]] | None = None
 _logged_missing_genai = False
+_pose_landmarker: Any | None = None
+_pose_landmarker_lock = threading.Lock()
+_pose_landmarker_initialized = False
+_pose_landmarker_cleanup_registered = False
 
 
 class ShotClassifierService:
@@ -50,13 +58,16 @@ class ShotClassifierService:
         artifacts: VideoArtifacts,
         video_path: Path,
         video_url: str | None = None,
+        intended_shot: str | None = None,
     ) -> ShotClassifierResult:
         start_frame_idx, trigger_source = _resolve_start_frame(artifacts)
+        normalized_intended_shot = _validate_intended_shot(intended_shot)
         logger.info(
-            "Starting shot_classifier analysis start_frame_idx={} trigger_source={} video_url={}",
+            "Starting shot_classifier analysis start_frame_idx={} trigger_source={} video_url={} intended_shot={}",
             start_frame_idx,
             trigger_source,
             video_url,
+            normalized_intended_shot,
         )
         try:
             result = self._run_sync(
@@ -65,6 +76,7 @@ class ShotClassifierService:
                 start_frame_idx,
                 trigger_source,
                 video_url,
+                normalized_intended_shot,
             )
         except FeatureError:
             raise
@@ -86,6 +98,7 @@ class ShotClassifierService:
         start_frame_idx: int,
         trigger_source: str,
         video_url: str | None,
+        intended_shot: str | None,
     ) -> ShotClassifierResult:
         timings_ms: dict[str, float] = {}
 
@@ -130,12 +143,17 @@ class ShotClassifierService:
             for label, score in zip(SHOT_CLASS_LABELS, scores, strict=False)
         }
         predicted_shot = SHOT_CLASS_LABELS[predicted_idx]
+        confidence = float(scores[predicted_idx])
         logger.info(
             "shot_classifier prediction predicted_shot={} confidence={:.3f} probabilities={}",
             predicted_shot,
-            float(scores[predicted_idx]),
+            confidence,
             probabilities,
         )
+        intent_match = predicted_shot == intended_shot if intended_shot is not None else None
+        intended_shot_score = probabilities.get(intended_shot) if intended_shot is not None else None
+        reference_shot = intended_shot or predicted_shot
+        analysis_basis = "intended_shot" if intended_shot is not None else "predicted_shot"
 
         t0 = time.perf_counter()
         logger.info("shot_classifier step=feature_extract:start video_url={}", video_url)
@@ -144,21 +162,49 @@ class ShotClassifierService:
         logger.info("shot_classifier step=feature_extract:done took_ms={:.1f} video_url={}", timings_ms["feature_extract"], video_url)
 
         t0 = time.perf_counter()
-        logger.info("shot_classifier step=mistake_analysis:start video_url={}", video_url)
-        analysis_result = _run_mistake_analysis(predicted_shot, features)
+        logger.info(
+            "shot_classifier step=mistake_analysis:start video_url={} basis={} reference_shot={}",
+            video_url,
+            analysis_basis,
+            reference_shot,
+        )
+        analysis_result = _run_mistake_analysis(reference_shot, features)
         timings_ms["mistake_analysis"] = _elapsed_ms(t0)
         logger.info("shot_classifier step=mistake_analysis:done took_ms={:.1f} video_url={}", timings_ms["mistake_analysis"], video_url)
         mistakes = analysis_result.get("mistakes", [])
         logger.info(
-            "shot_classifier mistake_analysis result predicted_shot={} mistakes_count={} analysis_result={}",
+            "shot_classifier mistake_analysis result predicted_shot={} intended_shot={} basis={} mistakes_count={} analysis_result={}",
             predicted_shot,
+            intended_shot,
+            analysis_basis,
             len(mistakes),
             analysis_result,
         )
 
         t0 = time.perf_counter()
+        logger.info("shot_classifier step=technique_map:start video_url={}", video_url)
+        technique_frame_bgr = _resolve_technique_frame_bgr(artifacts, frames)
+        technique_map, technique_details = _build_technique_map(
+            technique_frame_bgr=technique_frame_bgr,
+            handedness=artifacts.batter_handedness,
+        )
+        timings_ms["technique_map"] = _elapsed_ms(t0)
+        logger.info(
+            "shot_classifier step=technique_map:done took_ms={:.1f} video_url={} technique_map={}",
+            timings_ms["technique_map"],
+            video_url,
+            technique_map,
+        )
+
+        t0 = time.perf_counter()
         logger.info("shot_classifier step=feedback:start video_url={}", video_url)
-        coaching_feedback = _generate_ai_feedback(predicted_shot, float(scores[predicted_idx]), mistakes)
+        coaching_feedback = _generate_ai_feedback(
+            predicted_shot=predicted_shot,
+            confidence=confidence,
+            mistakes=mistakes,
+            reference_shot=reference_shot,
+            intended_shot=intended_shot,
+        )
         timings_ms["feedback"] = _elapsed_ms(t0)
         logger.info("shot_classifier step=feedback:done took_ms={:.1f} video_url={}", timings_ms["feedback"], video_url)
 
@@ -166,19 +212,20 @@ class ShotClassifierService:
         correction_summary = f"Critical ({critical_count})" if mistakes else "No issues detected"
 
         logger.info(
-            "shot_classifier timings_ms model_ready={:.1f} frame_read={:.1f} frame_normalize={:.1f} predict={:.1f} feature_extract={:.1f} mistake_analysis={:.1f} feedback={:.1f}",
+            "shot_classifier timings_ms model_ready={:.1f} frame_read={:.1f} frame_normalize={:.1f} predict={:.1f} feature_extract={:.1f} mistake_analysis={:.1f} technique_map={:.1f} feedback={:.1f}",
             timings_ms["model_ready"],
             timings_ms["frame_read"],
             timings_ms["frame_normalize"],
             timings_ms["predict"],
             timings_ms["feature_extract"],
             timings_ms["mistake_analysis"],
+            timings_ms["technique_map"],
             timings_ms["feedback"],
         )
 
         result = ShotClassifierResult(
             predicted_shot=predicted_shot,
-            confidence=float(scores[predicted_idx]),
+            confidence=confidence,
             probabilities=probabilities,
             frames_used=FRAME_COUNT,
             frame_start_index=start_frame_idx,
@@ -186,13 +233,28 @@ class ShotClassifierService:
             roi_entry_frame_index=artifacts.batter_roi_entry_frame_idx,
             trigger_source=trigger_source,
             video_url=video_url,
+            intended_shot=intended_shot,
+            intent_match=intent_match,
+            intended_shot_score=intended_shot_score,
+            mistake_analysis_basis=analysis_basis,
+            mistake_analysis_reference_shot=reference_shot,
+            technique_map=technique_map,
+            technique_map_basis="pose_landmark_heuristic",
+            technique_details=technique_details,
+            visual_feedback={
+                "mistakes": mistakes,
+                "technique_map": technique_map,
+                "technique_details": technique_details,
+            },
             mistake_analysis=mistakes,
             coaching_feedback=coaching_feedback,
             correction_summary=correction_summary,
         )
         logger.info(
-            "shot_classifier output predicted_shot={} confidence={:.3f} mistakes_count={} correction_summary={} coaching_feedback={}",
+            "shot_classifier output predicted_shot={} intended_shot={} basis={} confidence={:.3f} mistakes_count={} correction_summary={} coaching_feedback={}",
             result.predicted_shot,
+            result.intended_shot,
+            result.mistake_analysis_basis,
             result.confidence,
             len(result.mistake_analysis or []),
             result.correction_summary,
@@ -440,26 +502,26 @@ def get_prototypes() -> dict[str, dict[str, Any]]:
     return _prototypes
 
 
-def _run_mistake_analysis(predicted_shot: str, features: np.ndarray) -> dict[str, Any]:
+def _run_mistake_analysis(reference_shot: str, features: np.ndarray) -> dict[str, Any]:
     try:
         prototypes = get_prototypes()
         if not prototypes:
-            logger.info("shot_classifier mistake_analysis skipped reason=no_prototypes predicted_shot={}", predicted_shot)
+            logger.info("shot_classifier mistake_analysis skipped reason=no_prototypes reference_shot={}", reference_shot)
             return {}
-        if predicted_shot not in prototypes:
+        if reference_shot not in prototypes:
             logger.info(
-                "shot_classifier mistake_analysis skipped reason=missing_prototype predicted_shot={} available_labels={}",
-                predicted_shot,
+                "shot_classifier mistake_analysis skipped reason=missing_prototype reference_shot={} available_labels={}",
+                reference_shot,
                 sorted(prototypes.keys()),
             )
             return {}
 
-        prototype_data = prototypes[predicted_shot]
+        prototype_data = prototypes[reference_shot]
         prototype_mean = prototype_data.get("mean", np.zeros(FEATURE_DIM, dtype=np.float32))
         prototype_std = prototype_data.get("std", np.ones(FEATURE_DIM, dtype=np.float32))
         logger.info(
-            "shot_classifier mistake_analysis prototype_ready predicted_shot={} samples={} feature_dim={}",
-            predicted_shot,
+            "shot_classifier mistake_analysis prototype_ready reference_shot={} samples={} feature_dim={}",
+            reference_shot,
             int(prototype_data.get("samples", 0) or 0),
             int(features.shape[0]),
         )
@@ -479,8 +541,8 @@ def _run_mistake_analysis(predicted_shot: str, features: np.ndarray) -> dict[str
                         "actual_value": float(features[idx]),
                         "expected_value": float(prototype_mean[idx]),
                         "deviation": float(deviations[idx]),
-                        "explanation": f"Your movement embedding component {idx} was higher than expected for a {predicted_shot}.",
-                        "recommendation": f"Repeat {predicted_shot} drills to align with the learned prototype.",
+                        "explanation": f"Your movement embedding component {idx} was higher than expected for a {reference_shot}.",
+                        "recommendation": f"Repeat {reference_shot} drills to align with the learned prototype.",
                     }
                 )
 
@@ -490,18 +552,24 @@ def _run_mistake_analysis(predicted_shot: str, features: np.ndarray) -> dict[str
             "analysis_method": "efficientnetb4_gru_embedding",
         }
         logger.info(
-            "shot_classifier mistake_analysis completed predicted_shot={} mistakes_count={} top_deviation={:.3f}",
-            predicted_shot,
+            "shot_classifier mistake_analysis completed reference_shot={} mistakes_count={} top_deviation={:.3f}",
+            reference_shot,
             len(mistakes),
             float(np.max(deviations)) if deviations.size else 0.0,
         )
         return result
     except Exception as exc:
-        logger.warning("shot_classifier mistake_analysis failed predicted_shot={} error={}", predicted_shot, exc)
+        logger.warning("shot_classifier mistake_analysis failed reference_shot={} error={}", reference_shot, exc)
         return {}
 
 
-def _generate_ai_feedback(predicted_shot: str, confidence: float, mistakes: list[dict[str, Any]]) -> str:
+def _generate_ai_feedback(
+    predicted_shot: str,
+    confidence: float,
+    mistakes: list[dict[str, Any]],
+    reference_shot: str,
+    intended_shot: str | None,
+) -> str:
     global _logged_missing_genai
 
     status = get_google_genai_status()
@@ -528,8 +596,402 @@ def _generate_ai_feedback(predicted_shot: str, confidence: float, mistakes: list
         )
         _logged_missing_genai = True
 
+    if intended_shot is not None and intended_shot != predicted_shot:
+        if mistakes:
+            return (
+                f"You intended {intended_shot}, but the clip was classified as {predicted_shot}. "
+                f"Focus on aligning your technique with {reference_shot} fundamentals."
+            )
+        return (
+            f"You intended {intended_shot}, but the clip was classified as {predicted_shot}. "
+            f"Repeat the shot with clearer {reference_shot} mechanics."
+        )
     if confidence < 0.7:
         return f"Low confidence prediction for {predicted_shot}. Review form and positioning."
     if mistakes:
-        return f"Significant deviation from correct {predicted_shot} form. Focus on improving the identified body positions."
+        return f"Significant deviation from correct {reference_shot} form. Focus on improving the identified body positions."
     return f"Good {predicted_shot} execution. Continue practicing and refining technique."
+
+
+def _validate_intended_shot(intended_shot: str | None) -> str | None:
+    normalized_intended_shot = normalize_shot_label(intended_shot)
+    if normalized_intended_shot is None:
+        return None
+    if normalized_intended_shot not in SHOT_CLASS_LABELS:
+        raise FeatureError(
+            f"Unsupported intended_shot '{intended_shot}'. Expected one of: {', '.join(SHOT_CLASS_LABELS)}"
+        )
+    return normalized_intended_shot
+
+
+def _resolve_technique_frame_bgr(artifacts: VideoArtifacts, frames_rgb: np.ndarray) -> np.ndarray:
+    if artifacts.bat_contact_frame is not None and artifacts.bat_contact_frame.size > 0:
+        return artifacts.bat_contact_frame
+    if frames_rgb.size == 0:
+        raise FeatureError("Technique map requires at least one classifier frame.")
+    return cv2.cvtColor(frames_rgb[-1], cv2.COLOR_RGB2BGR)
+
+
+def _extract_pose_landmarks(frame_bgr: np.ndarray) -> dict[int, tuple[float, float, float, float]]:
+    if frame_bgr.size == 0:
+        return {}
+    try:
+        import mediapipe as mp
+    except ImportError as exc:
+        logger.warning("shot_classifier technique_map skipped: mediapipe unavailable ({})", exc)
+        return {}
+    try:
+        landmarker = _get_pose_landmarker()
+    except FeatureError as exc:
+        logger.warning("shot_classifier technique_map skipped: {}", exc)
+        return {}
+
+    image = mp.Image(
+        image_format=mp.ImageFormat.SRGB,
+        data=cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB),
+    )
+    results = landmarker.detect(image)
+    if not results.pose_landmarks:
+        return {}
+
+    landmarks: dict[int, tuple[float, float, float, float]] = {}
+    pose_landmarks = results.pose_landmarks[0]
+    for landmark_idx in POSE_LANDMARK_IDS:
+        landmark = pose_landmarks[landmark_idx]
+        landmarks[landmark_idx] = (
+            float(landmark.x),
+            float(landmark.y),
+            float(landmark.z),
+            float(getattr(landmark, "visibility", 1.0)),
+        )
+    return landmarks
+
+
+def _get_pose_landmarker() -> Any:
+    global _pose_landmarker
+    global _pose_landmarker_initialized
+    if _pose_landmarker is not None:
+        return _pose_landmarker
+    if _pose_landmarker_initialized:
+        raise FeatureError("PoseLandmarker initialization failed earlier.")
+
+    model_path = os.getenv("MEDIAPIPE_POSE_TASK_PATH")
+    if not model_path:
+        model_path = str(POSE_LANDMARKER_TASK_PATH)
+    model_file = Path(model_path)
+    if not model_file.exists():
+        raise FeatureError(
+            "mediapipe PoseLandmarker model is missing. "
+            "Set MEDIAPIPE_POSE_TASK_PATH or place the task file at "
+            f"{model_file}."
+        )
+
+    try:
+        from mediapipe.tasks.python import BaseOptions
+        from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions, RunningMode
+    except Exception as exc:
+        raise FeatureError(
+            "mediapipe Tasks API is unavailable. Install the full mediapipe package."
+        ) from exc
+
+    with _pose_landmarker_lock:
+        if _pose_landmarker is not None:
+            return _pose_landmarker
+        if _pose_landmarker_initialized:
+            raise FeatureError("PoseLandmarker initialization failed earlier.")
+
+        delegate_name = os.getenv("MEDIAPIPE_POSE_DELEGATE", "cpu").strip().lower()
+        delegate = BaseOptions.Delegate.GPU if delegate_name == "gpu" else BaseOptions.Delegate.CPU
+        if delegate is BaseOptions.Delegate.CPU:
+            logger.info("shot_classifier technique_map initializing PoseLandmarker with CPU delegate")
+        try:
+            options = PoseLandmarkerOptions(
+                base_options=BaseOptions(
+                    model_asset_path=str(model_file),
+                    delegate=delegate,
+                ),
+                running_mode=RunningMode.IMAGE,
+                num_poses=1,
+            )
+            _pose_landmarker = PoseLandmarker.create_from_options(options)
+        except OSError as cpu_exc:
+            raise FeatureError(
+                "MediaPipe PoseLandmarker could not be initialized because a required "
+                "system library is missing: "
+                f"{cpu_exc}. Install the OpenGL runtime package that provides "
+                "libGLESv2.so.2 in the Linux environment."
+            ) from cpu_exc
+        except Exception as exc:
+            if delegate is BaseOptions.Delegate.GPU:
+                logger.warning(
+                    "shot_classifier technique_map PoseLandmarker GPU delegate failed ({}). Falling back to CPU.",
+                    exc,
+                )
+                options = PoseLandmarkerOptions(
+                    base_options=BaseOptions(
+                        model_asset_path=str(model_file),
+                        delegate=BaseOptions.Delegate.CPU,
+                    ),
+                    running_mode=RunningMode.IMAGE,
+                    num_poses=1,
+                )
+                try:
+                    _pose_landmarker = PoseLandmarker.create_from_options(options)
+                except OSError as cpu_exc:
+                    raise FeatureError(
+                        "MediaPipe PoseLandmarker could not be initialized because a required "
+                        "system library is missing: "
+                        f"{cpu_exc}. Install the OpenGL runtime package that provides "
+                        "libGLESv2.so.2 in the Linux environment."
+                    ) from cpu_exc
+                except Exception as cpu_exc:
+                    raise FeatureError(
+                        f"MediaPipe PoseLandmarker CPU fallback failed: {cpu_exc}"
+                    ) from cpu_exc
+            else:
+                raise FeatureError(
+                    f"MediaPipe PoseLandmarker CPU initialization failed: {exc}"
+                ) from exc
+
+        _pose_landmarker_initialized = True
+        _register_landmarker_cleanup()
+        return _pose_landmarker
+
+
+def _register_landmarker_cleanup() -> None:
+    global _pose_landmarker_cleanup_registered
+    if _pose_landmarker_cleanup_registered:
+        return
+    if threading.current_thread() is not threading.main_thread():
+        return
+
+    def _cleanup_landmarker(*_args: Any) -> None:
+        global _pose_landmarker
+        if _pose_landmarker is None:
+            return
+        try:
+            _pose_landmarker.close()
+        except Exception as exc:
+            logger.debug("shot_classifier PoseLandmarker close failed: {}", exc)
+        finally:
+            _pose_landmarker = None
+
+    signal.signal(signal.SIGTERM, _cleanup_landmarker)
+    signal.signal(signal.SIGINT, _cleanup_landmarker)
+    _pose_landmarker_cleanup_registered = True
+
+
+def _build_technique_map(
+    technique_frame_bgr: np.ndarray,
+    handedness: BatterHandedness | None,
+) -> tuple[dict[str, float], list[dict[str, Any]]]:
+    default_map = {
+        "torso": 100.0,
+        "front_elbow": 100.0,
+        "back_elbow": 100.0,
+        "back_knee": 100.0,
+        "shoulders": 100.0,
+    }
+    landmarks = _extract_pose_landmarks(technique_frame_bgr)
+    if not landmarks:
+        return default_map, []
+
+    front_side, back_side = _resolve_front_and_back_sides(handedness, landmarks)
+
+    metric_specs = [
+        {
+            "key": "torso",
+            "label": "Torso",
+            "score": _score_torso(landmarks),
+            "metric": "spine_alignment",
+        },
+        {
+            "key": "front_elbow",
+            "label": "Front Elbow",
+            "score": _score_elbow(landmarks, front_side),
+            "metric": f"{front_side}_elbow_angle",
+        },
+        {
+            "key": "back_elbow",
+            "label": "Back Elbow",
+            "score": _score_elbow(landmarks, back_side),
+            "metric": f"{back_side}_elbow_angle",
+        },
+        {
+            "key": "back_knee",
+            "label": "Back Knee",
+            "score": _score_knee(landmarks, back_side),
+            "metric": f"{back_side}_knee_angle",
+        },
+        {
+            "key": "shoulders",
+            "label": "Shoulders",
+            "score": _score_shoulders(landmarks),
+            "metric": "shoulder_tilt",
+        },
+    ]
+
+    technique_map = {
+        spec["key"]: round(float(spec["score"]), 1)
+        for spec in metric_specs
+    }
+    details = [
+        {
+            "body_part": spec["label"],
+            "score": round(float(spec["score"]), 1),
+            "metric": spec["metric"],
+        }
+        for spec in metric_specs
+    ]
+    return technique_map, details
+
+
+def _resolve_front_and_back_sides(
+    handedness: BatterHandedness | None,
+    landmarks: dict[int, tuple[float, float, float, float]],
+) -> tuple[str, str]:
+    if handedness == BatterHandedness.LEFT:
+        return "right", "left"
+    if handedness == BatterHandedness.RIGHT:
+        return "left", "right"
+
+    left_visibility = _landmark_visibility(landmarks, 11) + _landmark_visibility(landmarks, 13)
+    right_visibility = _landmark_visibility(landmarks, 12) + _landmark_visibility(landmarks, 14)
+    if right_visibility > left_visibility:
+        return "right", "left"
+    return "left", "right"
+
+
+def _score_torso(landmarks: dict[int, tuple[float, float, float, float]]) -> float:
+    torso_visibility = min(
+        _landmark_visibility(landmarks, 11),
+        _landmark_visibility(landmarks, 12),
+        _landmark_visibility(landmarks, 23),
+        _landmark_visibility(landmarks, 24),
+    )
+    if torso_visibility < 0.35:
+        return 100.0
+
+    left_shoulder = _xy(landmarks, 11)
+    right_shoulder = _xy(landmarks, 12)
+    left_hip = _xy(landmarks, 23)
+    right_hip = _xy(landmarks, 24)
+    if None in {left_shoulder, right_shoulder, left_hip, right_hip}:
+        return 100.0
+
+    assert left_shoulder is not None
+    assert right_shoulder is not None
+    assert left_hip is not None
+    assert right_hip is not None
+
+    shoulder_mid = ((left_shoulder[0] + right_shoulder[0]) / 2.0, (left_shoulder[1] + right_shoulder[1]) / 2.0)
+    hip_mid = ((left_hip[0] + right_hip[0]) / 2.0, (left_hip[1] + right_hip[1]) / 2.0)
+    spine_dx = shoulder_mid[0] - hip_mid[0]
+    spine_dy = hip_mid[1] - shoulder_mid[1]
+    if abs(spine_dy) < 1e-6:
+        spine_dy = 1e-6
+    spine_lean = abs(math.degrees(math.atan2(spine_dx, spine_dy)))
+    hip_tilt = abs(_tilt_degrees(left_hip, right_hip))
+    return _combine_scores(
+        _score_from_delta(spine_lean, threshold=12.0, hard_limit=40.0, floor=20.0),
+        _score_from_delta(hip_tilt, threshold=10.0, hard_limit=28.0, floor=20.0),
+    )
+
+
+def _score_shoulders(landmarks: dict[int, tuple[float, float, float, float]]) -> float:
+    if min(_landmark_visibility(landmarks, 11), _landmark_visibility(landmarks, 12)) < 0.35:
+        return 100.0
+
+    left_shoulder = _xy(landmarks, 11)
+    right_shoulder = _xy(landmarks, 12)
+    if left_shoulder is None or right_shoulder is None:
+        return 100.0
+    shoulder_tilt = abs(_tilt_degrees(left_shoulder, right_shoulder))
+    return _score_from_delta(shoulder_tilt, threshold=10.0, hard_limit=35.0, floor=20.0)
+
+
+def _score_elbow(landmarks: dict[int, tuple[float, float, float, float]], side: str) -> float:
+    if side == "left":
+        points = (11, 13, 15)
+    else:
+        points = (12, 14, 16)
+    angle = _angle_for_landmarks(landmarks, *points)
+    if angle is None:
+        return 100.0
+    return _score_from_delta(abs(angle - 145.0), threshold=18.0, hard_limit=65.0)
+
+
+def _score_knee(landmarks: dict[int, tuple[float, float, float, float]], side: str) -> float:
+    if side == "left":
+        points = (23, 25, 27)
+    else:
+        points = (24, 26, 28)
+    angle = _angle_for_landmarks(landmarks, *points)
+    if angle is None:
+        return 100.0
+    return _score_from_delta(abs(angle - 150.0), threshold=15.0, hard_limit=55.0)
+
+
+def _landmark_visibility(landmarks: dict[int, tuple[float, float, float, float]], idx: int) -> float:
+    landmark = landmarks.get(idx)
+    if landmark is None:
+        return 0.0
+    return float(landmark[3])
+
+
+def _xy(
+    landmarks: dict[int, tuple[float, float, float, float]],
+    idx: int,
+    min_visibility: float = 0.2,
+) -> tuple[float, float] | None:
+    landmark = landmarks.get(idx)
+    if landmark is None or landmark[3] < min_visibility:
+        return None
+    return float(landmark[0]), float(landmark[1])
+
+
+def _angle_for_landmarks(
+    landmarks: dict[int, tuple[float, float, float, float]],
+    a_idx: int,
+    b_idx: int,
+    c_idx: int,
+) -> float | None:
+    a = _xy(landmarks, a_idx)
+    b = _xy(landmarks, b_idx)
+    c = _xy(landmarks, c_idx)
+    if a is None or b is None or c is None:
+        return None
+    return _angle_between_points(a, b, c)
+
+
+def _angle_between_points(a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]) -> float:
+    ba = np.asarray([a[0] - b[0], a[1] - b[1]], dtype=np.float32)
+    bc = np.asarray([c[0] - b[0], c[1] - b[1]], dtype=np.float32)
+    ba_norm = float(np.linalg.norm(ba))
+    bc_norm = float(np.linalg.norm(bc))
+    if ba_norm < 1e-6 or bc_norm < 1e-6:
+        return 180.0
+    cos_theta = float(np.dot(ba, bc) / (ba_norm * bc_norm))
+    return math.degrees(math.acos(float(np.clip(cos_theta, -1.0, 1.0))))
+
+
+def _tilt_degrees(a: tuple[float, float], b: tuple[float, float]) -> float:
+    dx = b[0] - a[0]
+    dy = b[1] - a[1]
+    return math.degrees(math.atan2(dy, dx))
+
+
+def _score_from_delta(delta: float, threshold: float, hard_limit: float, floor: float = 0.0) -> float:
+    if delta <= threshold:
+        return 100.0
+    if delta >= hard_limit:
+        return floor
+    ratio = (delta - threshold) / max(hard_limit - threshold, 1e-6)
+    return max(float(floor), 100.0 * (1.0 - ratio))
+
+
+def _combine_scores(*scores: float) -> float:
+    valid_scores = [score for score in scores if score is not None]
+    if not valid_scores:
+        return 100.0
+    return float(sum(valid_scores) / len(valid_scores))

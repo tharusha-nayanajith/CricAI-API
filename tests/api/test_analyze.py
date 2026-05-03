@@ -60,6 +60,63 @@ async def test_analyze_with_valid_payload_returns_job_id(
 
 
 @pytest.mark.asyncio
+async def test_analyze_normalizes_intended_shot_before_queueing(
+    test_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calibration = CalibrationDataFactory()
+    current_user = _authorized_user()
+    queued_jobs: list[dict[str, object]] = []
+
+    async def fake_require_entitlement() -> UserProfile:
+        return current_user
+
+    async def fake_enforce_clip_quota(session, user_id):
+        _ = session, user_id
+        return current_user
+
+    def fake_copy_upload_to_temp(upload):
+        return f"/tmp/{upload.filename}"
+
+    def fake_delay(
+        job_id,
+        selected_features,
+        source_video_path,
+        filename,
+        calibration_payload,
+        intended_shot=None,
+    ):
+        queued_jobs.append(
+            {
+                "job_id": job_id,
+                "selected_features": selected_features,
+                "source_video_path": source_video_path,
+                "filename": filename,
+                "calibration_payload": calibration_payload,
+                "intended_shot": intended_shot,
+            }
+        )
+
+    app.dependency_overrides[require_entitlement] = fake_require_entitlement
+    monkeypatch.setattr(analyze_module._user_service, "enforce_clip_quota", fake_enforce_clip_quota)
+    monkeypatch.setattr(analyze_module, "_copy_upload_to_temp", fake_copy_upload_to_temp)
+    monkeypatch.setattr(analyze_module.process_video_job, "delay", fake_delay)
+
+    response = await test_client.post(
+        "/analyze",
+        files={"video": ("sample.mp4", b"00", "video/mp4")},
+        data={
+            "calibration": calibration.model_dump_json(),
+            "features": "shot_classifier",
+            "intended_shot": "cover drive",
+        },
+    )
+
+    assert response.status_code == 200
+    assert queued_jobs[0]["intended_shot"] == "drive"
+
+
+@pytest.mark.asyncio
 async def test_analyze_with_malformed_calibration_returns_422(
     test_client,
     monkeypatch: pytest.MonkeyPatch,
@@ -306,3 +363,167 @@ async def test_process_job_runs_shot_classifier_with_roi_entry_frame(
 
 
 
+
+
+def _authorized_user() -> UserProfile:
+    return UserProfile(
+        id=uuid4(),
+        email="authorized@example.com",
+        full_name="Authorized User",
+        created_at=datetime.now(UTC),
+        is_active=True,
+        revenuecat_customer_id=None,
+        entitlement_status="active",
+        entitlement_expires_at=None,
+        current_tier="coach",
+        clips_used_this_month=0,
+        quota_reset_at=datetime.now(UTC),
+    )
+
+
+@pytest.mark.asyncio
+async def test_analyze_session_with_shared_calibration_reuses_single_payload(
+    test_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calibration = CalibrationDataFactory()
+    current_user = _authorized_user()
+    queued_jobs: list[dict[str, object]] = []
+
+    async def fake_require_entitlement() -> UserProfile:
+        return current_user
+
+    async def fake_enforce_clip_quota(session, user_id):
+        _ = session, user_id
+        return current_user
+
+    def fake_copy_upload_to_temp(upload):
+        return f"/tmp/{upload.filename}"
+
+    def fake_delay(job_id, selected_features, source_video_path, filename, calibration_payload, intended_shot=None):
+        queued_jobs.append(
+            {
+                "job_id": job_id,
+                "selected_features": selected_features,
+                "source_video_path": source_video_path,
+                "filename": filename,
+                "calibration_payload": calibration_payload,
+                "intended_shot": intended_shot,
+            }
+        )
+
+    app.dependency_overrides[require_entitlement] = fake_require_entitlement
+    monkeypatch.setattr(analyze_module._user_service, "enforce_clip_quota", fake_enforce_clip_quota)
+    monkeypatch.setattr(analyze_module, "_copy_upload_to_temp", fake_copy_upload_to_temp)
+    monkeypatch.setattr(analyze_module.process_video_job, "delay", fake_delay)
+
+    response = await test_client.post(
+        "/analyze/session",
+        files=[
+            ("videos", ("delivery1.mp4", b"01", "video/mp4")),
+            ("videos", ("delivery2.mp4", b"02", "video/mp4")),
+        ],
+        data={
+            "calibration": calibration.model_dump_json(),
+            "features": "bowler_performance",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "session_id" in payload
+    assert len(payload["delivery_ids"]) == 2
+    assert len(queued_jobs) == 2
+    assert queued_jobs[0]["calibration_payload"] == queued_jobs[1]["calibration_payload"]
+    assert queued_jobs[0]["selected_features"] == ["bowler_performance"]
+    assert queued_jobs[1]["selected_features"] == ["bowler_performance"]
+
+
+@pytest.mark.asyncio
+async def test_analyze_session_with_per_delivery_calibrations_uses_upload_order(
+    test_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calibration_one = CalibrationDataFactory(position=(1.0, 2.0, 3.0), yaw=1.0)
+    calibration_two = CalibrationDataFactory(position=(9.0, 8.0, 7.0), yaw=9.0)
+    current_user = _authorized_user()
+    queued_jobs: list[dict[str, object]] = []
+
+    async def fake_require_entitlement() -> UserProfile:
+        return current_user
+
+    async def fake_enforce_clip_quota(session, user_id):
+        _ = session, user_id
+        return current_user
+
+    def fake_copy_upload_to_temp(upload):
+        return f"/tmp/{upload.filename}"
+
+    def fake_delay(job_id, selected_features, source_video_path, filename, calibration_payload, intended_shot=None):
+        queued_jobs.append(
+            {
+                "filename": filename,
+                "calibration_payload": calibration_payload,
+                "intended_shot": intended_shot,
+            }
+        )
+
+    app.dependency_overrides[require_entitlement] = fake_require_entitlement
+    monkeypatch.setattr(analyze_module._user_service, "enforce_clip_quota", fake_enforce_clip_quota)
+    monkeypatch.setattr(analyze_module, "_copy_upload_to_temp", fake_copy_upload_to_temp)
+    monkeypatch.setattr(analyze_module.process_video_job, "delay", fake_delay)
+
+    response = await test_client.post(
+        "/analyze/session",
+        files=[
+            ("videos", ("delivery1.mp4", b"01", "video/mp4")),
+            ("videos", ("delivery2.mp4", b"02", "video/mp4")),
+        ],
+        data=[
+            ("calibration", calibration_one.model_dump_json()),
+            ("calibration", calibration_two.model_dump_json()),
+            ("features", "bowler_performance"),
+        ],
+    )
+
+    assert response.status_code == 200
+    assert len(queued_jobs) == 2
+    assert queued_jobs[0]["filename"] == "delivery1.mp4"
+    assert queued_jobs[1]["filename"] == "delivery2.mp4"
+    assert queued_jobs[0]["calibration_payload"]["position"] == [1.0, 2.0, 3.0]
+    assert queued_jobs[1]["calibration_payload"]["position"] == [9.0, 8.0, 7.0]
+
+
+@pytest.mark.asyncio
+async def test_analyze_session_rejects_invalid_calibration_count(
+    test_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calibration = CalibrationDataFactory()
+    current_user = _authorized_user()
+
+    async def fake_require_entitlement() -> UserProfile:
+        return current_user
+
+    async def fake_enforce_clip_quota(session, user_id):
+        _ = session, user_id
+        return current_user
+
+    app.dependency_overrides[require_entitlement] = fake_require_entitlement
+    monkeypatch.setattr(analyze_module._user_service, "enforce_clip_quota", fake_enforce_clip_quota)
+
+    response = await test_client.post(
+        "/analyze/session",
+        files=[
+            ("videos", ("delivery1.mp4", b"01", "video/mp4")),
+            ("videos", ("delivery2.mp4", b"02", "video/mp4")),
+            ("videos", ("delivery3.mp4", b"03", "video/mp4")),
+        ],
+        data=[
+            ("calibration", calibration.model_dump_json()),
+            ("calibration", calibration.model_dump_json()),
+        ],
+    )
+
+    assert response.status_code == 422
+    assert "Session calibration count" in response.text

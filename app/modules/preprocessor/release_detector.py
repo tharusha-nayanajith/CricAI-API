@@ -170,13 +170,29 @@ class ReleaseDetector:
 
     def load_models(self) -> None:
         logger.info("Loading release detector models")
-        self.release_session = self._create_onnx_session(self.release_model_path)
-        self.posenet_interpreter = self._create_tflite_interpreter(self.posenet_model_path)
-        self.classifier = _ReleaseClassifier(
-            self.release_session,
-            threshold=RELEASE_CONFIDENCE_THRESHOLD,
-        )
-        self.pose_decoder = _PoseNetDecoder(self.posenet_interpreter)
+        release_session: Any | None = None
+        posenet_interpreter: Any | None = None
+        classifier: _ReleaseClassifier | None = None
+        pose_decoder: _PoseNetDecoder | None = None
+        try:
+            release_session = self._create_onnx_session(self.release_model_path)
+            posenet_interpreter = self._create_tflite_interpreter(self.posenet_model_path)
+            classifier = _ReleaseClassifier(
+                release_session,
+                threshold=RELEASE_CONFIDENCE_THRESHOLD,
+            )
+            pose_decoder = _PoseNetDecoder(posenet_interpreter)
+        except Exception:
+            self.release_session = None
+            self.posenet_interpreter = None
+            self.classifier = None
+            self.pose_decoder = None
+            raise
+
+        self.release_session = release_session
+        self.posenet_interpreter = posenet_interpreter
+        self.classifier = classifier
+        self.pose_decoder = pose_decoder
 
     def process_frame(
         self,
@@ -228,16 +244,19 @@ class ReleaseDetector:
     @staticmethod
     def _create_tflite_interpreter(model_path: Path) -> Any:
         try:
-            from tflite_runtime.interpreter import Interpreter
+            import tensorflow as tf
         except ImportError:
             try:
-                import tensorflow as tf
+                from tflite_runtime.interpreter import Interpreter
             except ImportError as exc:
                 raise PreprocessingError(
                     "A TFLite interpreter is required for pose detection."
                 ) from exc
-            Interpreter = tf.lite.Interpreter
-        return Interpreter(model_path=str(model_path))
+            logger.info("Using tflite_runtime interpreter for pose detection")
+            return Interpreter(model_path=str(model_path))
+
+        logger.info("Using tensorflow.lite interpreter for pose detection")
+        return tf.lite.Interpreter(model_path=str(model_path))
 
     @staticmethod
     def _draw_release(

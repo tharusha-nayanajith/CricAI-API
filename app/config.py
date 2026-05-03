@@ -7,6 +7,14 @@ from redis.asyncio import Redis
 
 class Settings(BaseSettings):
     redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")
+    redis_socket_connect_timeout: float = Field(
+        default=2.0,
+        validation_alias="REDIS_SOCKET_CONNECT_TIMEOUT",
+    )
+    redis_socket_timeout: float = Field(
+        default=5.0,
+        validation_alias="REDIS_SOCKET_TIMEOUT",
+    )
     database_url: str = Field(
         default="postgresql+asyncpg://postgres:postgres@localhost:5432/crickai",
         validation_alias="DATABASE_URL",
@@ -56,4 +64,10 @@ def get_settings() -> Settings:
 
 def get_redis() -> Redis:
     settings = get_settings()
-    return Redis.from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
+    return Redis.from_url(
+        settings.redis_url,
+        encoding="utf-8",
+        decode_responses=True,
+        socket_connect_timeout=settings.redis_socket_connect_timeout,
+        socket_timeout=settings.redis_socket_timeout,
+    )

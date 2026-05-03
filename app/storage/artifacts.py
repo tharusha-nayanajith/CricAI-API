@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import cv2
-
 ARTIFACTS_ROOT = Path(os.getenv("CRICKAI_ARTIFACTS_DIR", "/tmp/crickai-artifacts"))
 
 
@@ -26,6 +24,8 @@ def build_artifact_url(job_id: str, feature_name: str, artifact_name: str) -> st
 
 
 def write_image_artifact(job_id: str, feature_name: str, artifact_name: str, image_bgr) -> str | None:
+    import cv2
+
     output_path = get_artifact_path(job_id, feature_name, artifact_name)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(output_path), image_bgr):
