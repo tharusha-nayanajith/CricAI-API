@@ -167,6 +167,50 @@ class WicketRiskPrediction(BaseModel):
     model_version: str = Field(serialization_alias="modelVersion")
 
 
+class OverlayPoint2D(BaseModel):
+    x: float
+    y: float
+
+
+class ReleaseVisualOverlay(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    overlay_id: str = Field(serialization_alias="overlayId")
+    label: str
+    status: str
+    color_hex: str = Field(serialization_alias="colorHex")
+    points: list[OverlayPoint2D] = Field(default_factory=list)
+    observation: str
+    reason: str
+    recommendation: str
+    metric_value: float | None = Field(default=None, serialization_alias="metricValue")
+    metric_label: str | None = Field(default=None, serialization_alias="metricLabel")
+
+
+class ReleaseVisualAnalysis(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    release_frame_image_url: str | None = Field(
+        default=None,
+        serialization_alias="releaseFrameImageUrl",
+    )
+    overlay_image_url: str | None = Field(
+        default=None,
+        serialization_alias="overlayImageUrl",
+    )
+    release_frame_width: int | None = Field(
+        default=None,
+        serialization_alias="releaseFrameWidth",
+    )
+    release_frame_height: int | None = Field(
+        default=None,
+        serialization_alias="releaseFrameHeight",
+    )
+    bowling_arm: str | None = Field(default=None, serialization_alias="bowlingArm")
+    overlays: list[ReleaseVisualOverlay] = Field(default_factory=list)
+    summary_notes: list[str] = Field(default_factory=list, serialization_alias="summaryNotes")
+
+
 class BowlerCoachingFeedback(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -204,6 +248,10 @@ class FlutterPayloadEntry(BaseModel):
         default=None,
         serialization_alias="wicketRisk",
     )
+    release_visual_analysis: ReleaseVisualAnalysis | None = Field(
+        default=None,
+        serialization_alias="releaseVisualAnalysis",
+    )
     coaching_feedback: BowlerCoachingFeedback | None = Field(
         default=None,
         serialization_alias="coachingFeedback",
@@ -240,6 +288,10 @@ class BowlerPerformanceResult(BaseModel):
     wicket_risk: WicketRiskPrediction | None = Field(
         default=None,
         serialization_alias="wicketRisk",
+    )
+    release_visual_analysis: ReleaseVisualAnalysis | None = Field(
+        default=None,
+        serialization_alias="releaseVisualAnalysis",
     )
     coaching_feedback: BowlerCoachingFeedback | None = Field(
         default=None,

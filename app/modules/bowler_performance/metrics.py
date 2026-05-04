@@ -19,6 +19,7 @@ WorldPoint = tuple[BallDetection, np.ndarray]
 
 DEFAULT_PROXY_RELEASE_EXTENSION_METRES = 1.5
 DEFAULT_PROXY_RELEASE_TO_BOUNCE_DISTANCE_METRES = 16.0
+MAX_PLAUSIBLE_BOUNCE_FRAME_OFFSET = 8
 
 
 def compute_speed(
@@ -84,6 +85,39 @@ def compute_bounce_and_length(
     return BouncePoint(x_metres=bounce_x, z_metres=bounce_z), length_class
 
 
+def _find_nearest_plausible_bounce_point(
+    pitch_points: list[PitchPoint],
+    bounce_frame: int | None,
+    max_frame_offset: int = MAX_PLAUSIBLE_BOUNCE_FRAME_OFFSET,
+) -> BouncePoint | None:
+    if bounce_frame is None:
+        return None
+
+    plausible_candidates: list[tuple[int, BouncePoint]] = []
+    for detection, pitch_point in pitch_points:
+        bounce_z = float(pitch_point[2])
+        if not 0.0 <= bounce_z <= BOWLING_STUMP_Z_METRES:
+            continue
+        frame_offset = abs(int(detection.frame_idx) - bounce_frame)
+        if frame_offset > max_frame_offset:
+            continue
+        plausible_candidates.append(
+            (
+                frame_offset,
+                BouncePoint(
+                    x_metres=float(pitch_point[0]),
+                    z_metres=bounce_z,
+                ),
+            )
+        )
+
+    if not plausible_candidates:
+        return None
+
+    plausible_candidates.sort(key=lambda item: (item[0], item[1].z_metres))
+    return plausible_candidates[0][1]
+
+
 def _is_plausible_canonical_bounce_point(
     canonical_bounce_point: BouncePoint,
     raw_bounce_point: BouncePoint | None,
@@ -143,6 +177,29 @@ def build_result(
     _ = world_points
     bounce_point, length_class = compute_bounce_and_length(pitch_points, bounce_frame)
     raw_bounce_point = bounce_point
+    if length_class is None:
+        fallback_bounce_point = _find_nearest_plausible_bounce_point(
+            pitch_points,
+            bounce_frame,
+        )
+        if fallback_bounce_point is not None:
+            logger.warning(
+                "Replacing implausible bounce point raw_bounce={} fallback_bounce={}",
+                (
+                    {
+                        "x": round(float(raw_bounce_point.x_metres), 3),
+                        "z": round(float(raw_bounce_point.z_metres), 3),
+                    }
+                    if raw_bounce_point is not None
+                    else None
+                ),
+                {
+                    "x": round(float(fallback_bounce_point.x_metres), 3),
+                    "z": round(float(fallback_bounce_point.z_metres), 3),
+                },
+            )
+            bounce_point = fallback_bounce_point
+            length_class = classify_length(fallback_bounce_point.z_metres)
     if canonical_bounce_point is not None:
         if _is_plausible_canonical_bounce_point(canonical_bounce_point, raw_bounce_point):
             bounce_point = canonical_bounce_point

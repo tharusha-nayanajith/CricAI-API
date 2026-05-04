@@ -16,6 +16,7 @@ from app.models.calibration import CalibrationData
 from app.models.job import FeatureResult
 from app.modules.shot_classifier.models import ShotClassifierResult
 from app.modules.bowler_performance.service import BowlerPerformanceAnalyzer
+from app.modules.bowler_performance.release_visuals import build_release_visual_analysis
 from app.modules.preprocessor.models import BallDetection
 from app.modules.preprocessor.service import VideoPreprocessor
 from app.storage.artifacts import write_image_artifact
@@ -92,6 +93,8 @@ async def run_bowler_performance(
     try:
         result = await _bowler_analyzer.run(artifacts, calibration, fps, video_url=video_url)
         thumbnail_image_url = None
+        release_frame_image_url = None
+        release_overlay_image_url = None
         if artifacts.release_frame is not None:
             thumbnail_image_url = write_image_artifact(
                 job_id,
@@ -99,12 +102,59 @@ async def run_bowler_performance(
                 "thumbnail.jpg",
                 artifacts.release_frame,
             )
+        release_visual_analysis = None
+        release_visual_source = (
+            artifacts.release_point.raw_frame
+            if artifacts.release_point is not None and artifacts.release_point.raw_frame is not None
+            else artifacts.release_frame
+        )
+        if release_visual_source is not None and getattr(release_visual_source, "size", 0) > 0:
+            release_visual_analysis, release_overlay_image = build_release_visual_analysis(
+                release_visual_source,
+                artifacts.release_point,
+            )
+            if release_visual_analysis is not None:
+                release_frame_image_url = write_image_artifact(
+                    job_id,
+                    "bowler_performance",
+                    "release_frame.jpg",
+                    release_visual_source,
+                )
+                if release_overlay_image is not None:
+                    release_overlay_image_url = write_image_artifact(
+                        job_id,
+                        "bowler_performance",
+                        "release_overlay.jpg",
+                        release_overlay_image,
+                    )
+                release_visual_analysis = release_visual_analysis.model_copy(
+                    update={
+                        "release_frame_image_url": release_frame_image_url,
+                        "overlay_image_url": release_overlay_image_url,
+                    }
+                )
         if thumbnail_image_url is not None:
             result = result.model_copy(
                 update={
                     "thumbnail_image_url": thumbnail_image_url,
                     "flutter_payload": [
-                        entry.model_copy(update={"thumbnail_image_url": thumbnail_image_url})
+                        entry.model_copy(
+                            update={
+                                "thumbnail_image_url": thumbnail_image_url,
+                                "release_visual_analysis": release_visual_analysis,
+                            }
+                        )
+                        for entry in result.flutter_payload
+                    ],
+                    "release_visual_analysis": release_visual_analysis,
+                }
+            )
+        elif release_visual_analysis is not None:
+            result = result.model_copy(
+                update={
+                    "release_visual_analysis": release_visual_analysis,
+                    "flutter_payload": [
+                        entry.model_copy(update={"release_visual_analysis": release_visual_analysis})
                         for entry in result.flutter_payload
                     ],
                 }
