@@ -109,7 +109,10 @@ strict_equality = true
 plugins = ["pydantic.mypy"]
 
 [tool.uv]
-environments = ["sys_platform == 'linux' and python_version >= '3.11' and python_version < '3.13'"]
+environments = [
+    "sys_platform == 'linux' and python_version >= '3.11' and python_version < '3.13'",
+    "sys_platform == 'win32' and python_version >= '3.11' and python_version < '3.13'",
+]
 
 [dependency-groups]
 dev = [
