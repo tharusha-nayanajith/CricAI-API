@@ -167,6 +167,27 @@ class WicketRiskPrediction(BaseModel):
     model_version: str = Field(serialization_alias="modelVersion")
 
 
+class BowlerCoachingFeedback(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    analysis_scope: str = Field(
+        validation_alias="analysisScope",
+        serialization_alias="analysisScope",
+    )
+    sample_size: int = Field(
+        validation_alias="sampleSize",
+        serialization_alias="sampleSize",
+    )
+    summary: str
+    strengths: list[str] = Field(default_factory=list)
+    improvements: list[str] = Field(default_factory=list)
+    next_steps: list[str] = Field(
+        default_factory=list,
+        validation_alias="nextSteps",
+        serialization_alias="nextSteps",
+    )
+
+
 class FlutterPayloadEntry(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -182,6 +203,10 @@ class FlutterPayloadEntry(BaseModel):
     wicket_risk: WicketRiskPrediction | None = Field(
         default=None,
         serialization_alias="wicketRisk",
+    )
+    coaching_feedback: BowlerCoachingFeedback | None = Field(
+        default=None,
+        serialization_alias="coachingFeedback",
     )
     ball_track: BallTrackPayload | None = Field(default=None, serialization_alias="ballTrack")
     camera_calibration: CameraCalibrationPayload | None = Field(
@@ -215,6 +240,10 @@ class BowlerPerformanceResult(BaseModel):
     wicket_risk: WicketRiskPrediction | None = Field(
         default=None,
         serialization_alias="wicketRisk",
+    )
+    coaching_feedback: BowlerCoachingFeedback | None = Field(
+        default=None,
+        serialization_alias="coachingFeedback",
     )
     video_url: str | None = Field(default=None, serialization_alias="videoURL")
     thumbnail_image_url: str | None = Field(

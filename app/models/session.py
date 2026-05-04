@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from app.models.job import FeatureResult
+from app.modules.bowler_performance.models import BowlerCoachingFeedback
 
 
 class SessionDeliveryRef(BaseModel):
@@ -36,6 +37,7 @@ class SessionSummary(BaseModel):
     max_speed_kmh: float | None = None
     avg_wicket_risk_percentage: float | None = None
     length_breakdown: dict[str, int]
+    coaching_feedback: BowlerCoachingFeedback | None = None
 
 
 class SessionResult(BaseModel):

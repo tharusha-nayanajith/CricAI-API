@@ -11,6 +11,7 @@ from app.models.session import (
     SessionResult,
     SessionSummary,
 )
+from app.modules.bowler_performance.models import BowlerCoachingFeedback
 from app.storage.results import get_job_status
 
 SESSIONS_TTL_SECONDS = 3600
@@ -23,22 +24,53 @@ def _session_key(session_id: str) -> str:
 
 async def store_session(session_id: str, deliveries: list[SessionDeliveryRef]) -> None:
     redis = get_redis()
-    payload = {"session_id": session_id, "deliveries": [item.model_dump() for item in deliveries]}
+    payload = {
+        "session_id": session_id,
+        "deliveries": [item.model_dump() for item in deliveries],
+        "bowler_coaching_feedback": None,
+    }
     await redis.set(_session_key(session_id), json.dumps(payload), ex=SESSIONS_TTL_SECONDS)
 
 
-async def get_session_delivery_refs(session_id: str) -> list[SessionDeliveryRef]:
+async def _get_session_payload(session_id: str) -> dict[str, object]:
     redis = get_redis()
     value = await redis.get(_session_key(session_id))
     if value is None:
         raise KeyError(session_id)
-    payload = json.loads(value)
+    return json.loads(value)
+
+
+async def get_session_delivery_refs(session_id: str) -> list[SessionDeliveryRef]:
+    payload = await _get_session_payload(session_id)
     deliveries = payload.get("deliveries", [])
     return [SessionDeliveryRef.model_validate(item) for item in deliveries]
 
 
+async def get_session_cached_bowler_coaching(
+    session_id: str,
+) -> BowlerCoachingFeedback | None:
+    payload = await _get_session_payload(session_id)
+    coaching_feedback = payload.get("bowler_coaching_feedback")
+    if coaching_feedback is None:
+        return None
+    return BowlerCoachingFeedback.model_validate(coaching_feedback)
+
+
+async def store_session_cached_bowler_coaching(
+    session_id: str,
+    coaching_feedback: BowlerCoachingFeedback,
+) -> None:
+    redis = get_redis()
+    payload = await _get_session_payload(session_id)
+    payload["bowler_coaching_feedback"] = coaching_feedback.model_dump(by_alias=True)
+    await redis.set(_session_key(session_id), json.dumps(payload), ex=SESSIONS_TTL_SECONDS)
+
+
 async def get_session_result(session_id: str) -> SessionResult:
-    delivery_refs = await get_session_delivery_refs(session_id)
+    payload = await _get_session_payload(session_id)
+    deliveries = payload.get("deliveries", [])
+    delivery_refs = [SessionDeliveryRef.model_validate(item) for item in deliveries]
+    cached_coaching = payload.get("bowler_coaching_feedback")
     jobs_by_id: dict[str, JobStatus] = {}
     for item in delivery_refs:
         try:
@@ -55,7 +87,12 @@ async def get_session_result(session_id: str) -> SessionResult:
             _build_bowler_delivery(item, jobs_by_id.get(item.delivery_id))
             for item in delivery_refs
         ],
-        summary=_build_summary(list(jobs_by_id.values())),
+        summary=_build_summary(
+            list(jobs_by_id.values()),
+            BowlerCoachingFeedback.model_validate(cached_coaching)
+            if cached_coaching is not None
+            else None,
+        ),
     )
 
 
@@ -113,7 +150,10 @@ def _compute_session_overall_status(progress: SessionProgress) -> SessionOverall
     return "pending"
 
 
-def _build_summary(deliveries: list[JobStatus]) -> SessionSummary:
+def _build_summary(
+    deliveries: list[JobStatus],
+    coaching_feedback: BowlerCoachingFeedback | None = None,
+) -> SessionSummary:
     speeds: list[float] = []
     wicket_risks: list[float] = []
     length_breakdown: dict[str, int] = {}
@@ -139,4 +179,5 @@ def _build_summary(deliveries: list[JobStatus]) -> SessionSummary:
         max_speed_kmh=(round(max(speeds), 2) if speeds else None),
         avg_wicket_risk_percentage=(round(mean(wicket_risks), 2) if wicket_risks else None),
         length_breakdown=length_breakdown,
+        coaching_feedback=coaching_feedback,
     )

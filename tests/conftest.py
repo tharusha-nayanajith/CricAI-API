@@ -33,6 +33,10 @@ class FakeRedis:
             return 1
         return 0
 
+    async def publish(self, channel: str, message: str) -> int:
+        _ = channel, message
+        return 1
+
 
 class KeypointFactory(factory.Factory):
     class Meta:
