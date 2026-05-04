@@ -12,7 +12,10 @@ from app.models.session import (
     SessionSummary,
 )
 from app.modules.bowler_performance.models import BowlerCoachingFeedback
+from app.storage.database import AnalysisSessionRecord, SessionDeliveryRecord, get_sessionmaker
 from app.storage.results import get_job_status
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 SESSIONS_TTL_SECONDS = 3600
 SessionOverallStatus = Literal["pending", "processing", "done", "partial", "failed"]
@@ -41,7 +44,21 @@ async def _get_session_payload(session_id: str) -> dict[str, object]:
 
 
 async def get_session_delivery_refs(session_id: str) -> list[SessionDeliveryRef]:
-    payload = await _get_session_payload(session_id)
+    try:
+        payload = await _get_session_payload(session_id)
+    except KeyError:
+        async with get_sessionmaker()() as session:
+            stmt = (
+                select(SessionDeliveryRecord)
+                .where(SessionDeliveryRecord.session_id == session_id)
+                .order_by(SessionDeliveryRecord.sequence_no.asc())
+            )
+            deliveries = (await session.scalars(stmt)).all()
+        if not deliveries:
+            raise
+        return [
+            SessionDeliveryRef(delivery_id=item.job_id, filename=item.filename) for item in deliveries
+        ]
     deliveries = payload.get("deliveries", [])
     return [SessionDeliveryRef.model_validate(item) for item in deliveries]
 
@@ -49,8 +66,15 @@ async def get_session_delivery_refs(session_id: str) -> list[SessionDeliveryRef]
 async def get_session_cached_bowler_coaching(
     session_id: str,
 ) -> BowlerCoachingFeedback | None:
-    payload = await _get_session_payload(session_id)
-    coaching_feedback = payload.get("bowler_coaching_feedback")
+    try:
+        payload = await _get_session_payload(session_id)
+        coaching_feedback = payload.get("bowler_coaching_feedback")
+    except KeyError:
+        async with get_sessionmaker()() as session:
+            record = await session.get(AnalysisSessionRecord, session_id)
+        if record is None or record.bowler_coaching_feedback is None:
+            return None
+        coaching_feedback = record.bowler_coaching_feedback
     if coaching_feedback is None:
         return None
     return BowlerCoachingFeedback.model_validate(coaching_feedback)
@@ -61,16 +85,42 @@ async def store_session_cached_bowler_coaching(
     coaching_feedback: BowlerCoachingFeedback,
 ) -> None:
     redis = get_redis()
-    payload = await _get_session_payload(session_id)
-    payload["bowler_coaching_feedback"] = coaching_feedback.model_dump(by_alias=True)
-    await redis.set(_session_key(session_id), json.dumps(payload), ex=SESSIONS_TTL_SECONDS)
+    try:
+        payload = await _get_session_payload(session_id)
+        payload["bowler_coaching_feedback"] = coaching_feedback.model_dump(by_alias=True)
+        await redis.set(_session_key(session_id), json.dumps(payload), ex=SESSIONS_TTL_SECONDS)
+    except KeyError:
+        pass
+
+    async with get_sessionmaker()() as session:
+        record = await session.get(AnalysisSessionRecord, session_id)
+        if record is None:
+            return
+        record.bowler_coaching_feedback = coaching_feedback.model_dump(by_alias=True)
+        await session.commit()
 
 
 async def get_session_result(session_id: str) -> SessionResult:
-    payload = await _get_session_payload(session_id)
-    deliveries = payload.get("deliveries", [])
-    delivery_refs = [SessionDeliveryRef.model_validate(item) for item in deliveries]
-    cached_coaching = payload.get("bowler_coaching_feedback")
+    try:
+        payload = await _get_session_payload(session_id)
+        deliveries = payload.get("deliveries", [])
+        delivery_refs = [SessionDeliveryRef.model_validate(item) for item in deliveries]
+        cached_coaching = payload.get("bowler_coaching_feedback")
+    except KeyError:
+        async with get_sessionmaker()() as session:
+            stmt = (
+                select(AnalysisSessionRecord)
+                .where(AnalysisSessionRecord.id == session_id)
+                .options(selectinload(AnalysisSessionRecord.deliveries))
+            )
+            record = await session.scalar(stmt)
+        if record is None:
+            raise
+        delivery_refs = [
+            SessionDeliveryRef(delivery_id=item.job_id, filename=item.filename)
+            for item in sorted(record.deliveries, key=lambda item: item.sequence_no)
+        ]
+        cached_coaching = record.bowler_coaching_feedback
     jobs_by_id: dict[str, JobStatus] = {}
     for item in delivery_refs:
         try:

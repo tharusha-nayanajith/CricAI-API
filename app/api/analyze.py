@@ -23,6 +23,7 @@ from app.modules.users.models import UserProfile
 from app.modules.users.service import UserService
 from app.storage.calibration import store_calibration
 from app.storage.database import get_db_session
+from app.storage.history import add_session_delivery, create_analysis_job, create_analysis_session
 from app.storage.results import initialize_job_status
 from app.storage.sessions import store_session
 
@@ -172,7 +173,15 @@ async def analyze_video(
     job_id = str(uuid4())
     try:
         await store_calibration(job_id, calibration_data)
-        await initialize_job_status(job_id)
+        await create_analysis_job(
+            session,
+            job_id=job_id,
+            user_id=current_user.id,
+            filename=video.filename or "upload.mp4",
+            requested_features=selected_features,
+        )
+        await session.commit()
+        await initialize_job_status(job_id, selected_features)
         _dispatch_process_video_job(
             job_id,
             selected_features,
@@ -215,6 +224,7 @@ async def analyze_session(
     session_id = str(uuid4())
     delivery_refs: list[SessionDeliveryRef] = []
     try:
+        await create_analysis_session(session, session_id=session_id, user_id=current_user.id)
         for video, source_video_path, calibration_entry in zip(
             videos,
             source_video_paths,
@@ -225,7 +235,22 @@ async def analyze_session(
             job_id = str(uuid4())
             filename = video.filename or "upload.mp4"
             await store_calibration(job_id, calibration_data)
-            await initialize_job_status(job_id)
+            await create_analysis_job(
+                session,
+                job_id=job_id,
+                user_id=current_user.id,
+                filename=filename,
+                requested_features=selected_features,
+                session_id=session_id,
+            )
+            await add_session_delivery(
+                session,
+                session_id=session_id,
+                job_id=job_id,
+                sequence_no=len(delivery_refs),
+                filename=filename,
+            )
+            await initialize_job_status(job_id, selected_features)
             _dispatch_process_video_job(
                 job_id,
                 selected_features,
@@ -234,6 +259,7 @@ async def analyze_session(
                 calibration_payload,
             )
             delivery_refs.append(SessionDeliveryRef(delivery_id=job_id, filename=filename))
+        await session.commit()
         await store_session(session_id, delivery_refs)
     except RedisError as exc:
         await asyncio.gather(

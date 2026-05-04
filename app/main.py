@@ -1,11 +1,12 @@
 from fastapi import FastAPI
 
-from app.api import analyze, auth, presentation, results, sessions, webhooks
+from app.api import analyze, auth, history, presentation, results, sessions, webhooks
 from app.storage.database import dispose_database, init_database
 
 app = FastAPI(title="CrickAI API")
 app.include_router(analyze.router)
 app.include_router(auth.router)
+app.include_router(history.router)
 app.include_router(presentation.router)
 app.include_router(results.router)
 app.include_router(sessions.router)

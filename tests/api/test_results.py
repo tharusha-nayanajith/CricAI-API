@@ -30,6 +30,12 @@ async def test_results_known_job_returns_job_status_shape(test_client) -> None:
     assert response.json() == {
         "job_id": "known-job",
         "overall_status": "processing",
+        "requested_features": [
+            "bowler_performance",
+            "action_legality",
+            "shot_classifier",
+            "shot_similarity",
+        ],
         "bowler_performance": {"status": "done", "result": {}, "error": None},
         "action_legality": {"status": "pending", "result": None, "error": None},
         "shot_classifier": {"status": "pending", "result": None, "error": None},
