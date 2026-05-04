@@ -10,6 +10,7 @@ dependencies = [
     "celery>=5.4.0",
     "fastapi>=0.115.0",
     "google-genai",
+    "greenlet>=3.0.0",
     "loguru>=0.7.2",
     "moviepy>=1.0.3",
     "numpy>=2.1.0",
@@ -35,7 +36,7 @@ ml-base-cpu = [
     "onnxruntime>=1.19.2",
 ]
 ml-base-gpu = [
-    "onnxruntime-gpu>=1.19.2",
+    "onnxruntime-gpu>=1.19.2; sys_platform == 'linux'",
 ]
 bowler-performance = [
     "filterpy>=1.4.5",
@@ -109,7 +110,10 @@ strict_equality = true
 plugins = ["pydantic.mypy"]
 
 [tool.uv]
-environments = ["sys_platform == 'linux' and python_version >= '3.11' and python_version < '3.13'"]
+environments = [
+    "sys_platform == 'linux' and python_version >= '3.11' and python_version < '3.13'",
+    "sys_platform == 'darwin' and python_version >= '3.11' and python_version < '3.13'",
+]
 
 [dependency-groups]
 dev = [

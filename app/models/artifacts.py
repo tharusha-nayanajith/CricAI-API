@@ -8,6 +8,7 @@ from app.modules.preprocessor.models import (
     BatContactResult,
     BatterHandedness,
     BatterMode,
+    BatterROI,
     FrameBallDetections,
     ReleasePoint,
 )
@@ -21,6 +22,7 @@ class VideoArtifacts:
     standardized_video_path: Path | None = None
     release_point: ReleasePoint | None = None
     batter_mode: BatterMode | None = None
+    batter_roi: BatterROI | None = None
     batter_handedness: BatterHandedness | None = None
     batter_roi_entry_frame_idx: int | None = None
     bat_contact: BatContactResult | None = None

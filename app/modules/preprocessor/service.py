@@ -24,7 +24,6 @@ from app.modules.preprocessor.constants import (
     STANDARDIZED_WIDTH,
 )
 from app.modules.preprocessor.models import (
-    BatterHandedness,
     BatterMode,
     DeliveryContext,
     ReleasePoint,
@@ -153,7 +152,8 @@ class VideoPreprocessor:
             self._release_frame = ctx.release_point.annotated_frame
             self._release_point = ctx.release_point
             logger.info(
-                "preprocessor timings_ms standardize={:.1f} batter_detect={:.1f} fps_read={:.1f} release_detect={:.1f} total={:.1f}",
+                "preprocessor timings_ms standardize={:.1f} batter_detect={:.1f} "
+                "fps_read={:.1f} release_detect={:.1f} total={:.1f}",
                 timings_ms["standardize"],
                 timings_ms["batter_detect"],
                 timings_ms["fps_read"],
@@ -167,6 +167,7 @@ class VideoPreprocessor:
                 standardized_video_path=std_path,
                 release_point=ctx.release_point,
                 batter_mode=ctx.batter_mode,
+                batter_roi=ctx.batter_roi,
                 batter_handedness=ctx.batter_handedness,
                 bat_contact=None,
                 ball_candidates_by_frame=[],
@@ -213,7 +214,9 @@ class VideoPreprocessor:
         self._release_point = ctx.release_point
 
         logger.info(
-            "preprocessor timings_ms standardize={:.1f} batter_detect={:.1f} fps_read={:.1f} release_detect={:.1f} ball_track={:.1f} bat_contact={:.1f} total={:.1f}",
+            "preprocessor timings_ms standardize={:.1f} batter_detect={:.1f} "
+            "fps_read={:.1f} release_detect={:.1f} ball_track={:.1f} "
+            "bat_contact={:.1f} total={:.1f}",
             timings_ms["standardize"],
             timings_ms["batter_detect"],
             timings_ms["fps_read"],
@@ -232,6 +235,7 @@ class VideoPreprocessor:
             standardized_video_path=std_path,
             release_point=ctx.release_point,
             batter_mode=ctx.batter_mode,
+            batter_roi=ctx.batter_roi,
             batter_handedness=ctx.batter_handedness,
             batter_roi_entry_frame_idx=ctx.batter_roi_entry_frame_idx,
             bat_contact=ctx.bat_contact,

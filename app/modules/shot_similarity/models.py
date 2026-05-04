@@ -23,3 +23,7 @@ class ShotSimilarityResult(BaseModel):
     feedback: list[str]
     compared_frame: str
     video_url: str | None = None
+    ai_feedback: str | None = None
+    visualization_video_url: str | None = None
+    normalized_user_url: str | None = None
+    normalized_reference_url: str | None = None

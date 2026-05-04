@@ -14,10 +14,10 @@ from app.exceptions import FeatureError
 from app.models.artifacts import VideoArtifacts
 from app.models.calibration import CalibrationData
 from app.models.job import FeatureResult
-from app.modules.shot_classifier.models import ShotClassifierResult
 from app.modules.bowler_performance.service import BowlerPerformanceAnalyzer
 from app.modules.preprocessor.models import BallDetection
 from app.modules.preprocessor.service import VideoPreprocessor
+from app.modules.shot_classifier.models import ShotClassifierResult
 from app.storage.results import set_feature_status, store_result
 
 _preprocessor = VideoPreprocessor()
@@ -152,6 +152,7 @@ async def run_shot_similarity(
             artifacts,
             video_url=video_url,
             classified_shot_type=classified_shot_type,
+            job_id=job_id,
         )
         await store_result(
             job_id,
@@ -244,17 +245,26 @@ async def process_job(
     safe_name = Path(filename or source_path.name or "upload.mp4").name or "upload.mp4"
     video_path = job_dir / safe_name
     loop = asyncio.get_running_loop()
+    feature_set = set(implemented_features)
+    shot_similarity_only = feature_set == {"shot_similarity"}
 
     try:
         await loop.run_in_executor(None, partial(shutil.copy2, source_path, video_path))
-        artifacts = await _preprocessor.run(
-            video_path,
-            calibration,
-            require_ball_path=bool(
-                {"bowler_performance", "shot_classifier", "shot_similarity"}
-                & set(implemented_features)
-            ),
-        )
+        if shot_similarity_only:
+            artifacts = await _preprocessor.run(
+                video_path,
+                calibration,
+                require_ball_path=True,
+            )
+        else:
+            artifacts = await _preprocessor.run(
+                video_path,
+                calibration,
+                require_ball_path=bool(
+                    {"bowler_performance", "shot_classifier", "shot_similarity"}
+                    & feature_set
+                ),
+            )
     except Exception as exc:
         logger.error("Preprocessor failed for {}: {}", job_id, exc)
         for feature_name in implemented_features:
@@ -271,7 +281,7 @@ async def process_job(
             await run_action_legality(job_id, artifacts, safe_name)
         classifier_result: ShotClassifierResult | None = None
         classifier_error: Exception | None = None
-        classifier_needed = bool({"shot_classifier", "shot_similarity"} & set(implemented_features))
+        classifier_needed = bool({"shot_classifier", "shot_similarity"} & feature_set)
         if classifier_needed:
             if "shot_classifier" in implemented_features:
                 await set_feature_status(job_id, "shot_classifier", "processing")
@@ -308,14 +318,29 @@ async def process_job(
                     )
 
         if "shot_similarity" in implemented_features:
-            if classifier_result is None:
-                message = "Shot similarity requires a shot classification result."
-                if classifier_error is not None:
-                    message = f"Shot similarity prerequisite failed: {classifier_error}"
+            if classifier_error is not None:
                 await store_result(
                     job_id,
                     "shot_similarity",
-                    FeatureResult(status="failed", error=message),
+                    FeatureResult(
+                        status="failed",
+                        error=(
+                            "Shot classification failed before similarity matching: "
+                            f"{classifier_error}"
+                        ),
+                    ),
+                )
+            elif classifier_result is None:
+                await store_result(
+                    job_id,
+                    "shot_similarity",
+                    FeatureResult(
+                        status="failed",
+                        error=(
+                            "Shot classification did not produce a result for "
+                            "similarity matching."
+                        ),
+                    ),
                 )
             else:
                 await run_shot_similarity(

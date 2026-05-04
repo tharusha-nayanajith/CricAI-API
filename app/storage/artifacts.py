@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -25,9 +26,36 @@ def build_artifact_url(job_id: str, feature_name: str, artifact_name: str) -> st
     return f"/results/{job_id}/artifacts/{feature_name}/{safe_name}"
 
 
-def write_image_artifact(job_id: str, feature_name: str, artifact_name: str, image_bgr) -> str | None:
+def write_image_artifact(
+    job_id: str,
+    feature_name: str,
+    artifact_name: str,
+    image_bgr,
+) -> str | None:
     output_path = get_artifact_path(job_id, feature_name, artifact_name)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(output_path), image_bgr):
         return None
     return build_artifact_url(job_id, feature_name, artifact_name)
+
+
+def write_json_artifact(
+    job_id: str,
+    feature_name: str,
+    artifact_name: str,
+    payload: object,
+) -> str:
+    output_path = get_artifact_path(job_id, feature_name, artifact_name)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return build_artifact_url(job_id, feature_name, artifact_name)
+
+
+def build_video_artifact_path(
+    job_id: str,
+    feature_name: str,
+    artifact_name: str,
+) -> tuple[Path, str]:
+    output_path = get_artifact_path(job_id, feature_name, artifact_name)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    return output_path, build_artifact_url(job_id, feature_name, artifact_name)
