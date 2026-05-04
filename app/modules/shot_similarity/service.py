@@ -31,10 +31,10 @@ REFERENCE_SHOTS_PLAYER_NAME = "Virat Koli"
 SHOT_SIMILARITY_FEATURE_NAME = "shot_similarity"
 TARGET_FRAME_COUNT = 30
 LANDMARK_COUNT = 33
-MIN_VALID_POSE_FRAME_RATIO = 0.35
-MIN_AVG_POSE_VISIBILITY = 20.0
-MIN_VALID_CORE_LANDMARKS = 8
-MIN_BODY_SCALE = 0.03
+MIN_VALID_POSE_FRAME_RATIO = 0.10
+MIN_AVG_POSE_VISIBILITY = 5.0
+MIN_VALID_CORE_LANDMARKS = 4
+MIN_BODY_SCALE = 0.01
 CORE_LANDMARKS = (11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28)
 
 _reference_library: list[_LoadedShotReference] | None = None
@@ -711,9 +711,10 @@ def _validate_pose_quality(frames: list[list[PoseKeypoint]]) -> None:
     avg_visibility = _sequence_visibility(frames)
     valid_frame_count = sum(1 for frame in frames if _is_valid_pose_frame(frame))
     valid_frame_ratio = valid_frame_count / max(len(frames), 1)
-    if (
+    detected_keypoints = _detected_keypoint_count(frames)
+    if detected_keypoints > 0 and (
         avg_visibility >= MIN_AVG_POSE_VISIBILITY
-        and valid_frame_ratio >= MIN_VALID_POSE_FRAME_RATIO
+        or valid_frame_ratio >= MIN_VALID_POSE_FRAME_RATIO
     ):
         return
 
